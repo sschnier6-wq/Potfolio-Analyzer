@@ -209,16 +209,16 @@
       // ---------- Special handler: RW Baird (and similar) "Security ID: TICKER" format ----------
       // Baird exports put the ticker/CUSIP in a header row "Security ID: AAPL"
       // and the actual holdings (account, name, qty, value) on the following rows.
-      const looksLikeBaird = !tickerCol && (
-        (descCol && /security.?name/i.test(descCol)) ||
-        headers.some(h => /security.?name/i.test(String(h || ''))) ||
-        rows.some(r => Object.values(r || {}).some(v => String(v || '').startsWith('Security ID:')))
+      const hasSecurityIdRows = rows.some(r =>
+        Object.values(r || {}).some(v => /^Security ID:\s*/i.test(String(v || '').trim()))
       );
 
-      if (looksLikeBaird || (broker && broker.toLowerCase().includes('baird'))) {
-        return parseBairdStyle(rows, headers, broker || 'RW Baird', sourceName, {
+      if (hasSecurityIdRows || (broker && /baird/i.test(broker))) {
+        const bairdResult = parseBairdStyle(rows, headers, broker || 'RW Baird', sourceName, {
           qtyCol, valueCol, priceCol, acctCol, descCol, catCol
         });
+        if (bairdResult.length > 0) return bairdResult;
+        // If Baird parser returned nothing, fall through and try normal path
       }
 
       if (!tickerCol) {
@@ -274,17 +274,16 @@
 
     // RW Baird (and similar custodians) put the identifier in "Security ID: XXX" rows
     function parseBairdStyle(rows, headers, broker, sourceName, cols) {
-      const { qtyCol, valueCol, priceCol, acctCol, descCol, catCol } = cols;
       let currentTicker = null;
       const out = [];
 
       for (const r of rows) {
         if (!r) continue;
+        const vals = Object.values(r).map(v => (v == null ? '' : String(v).trim()));
 
-        // Look for a "Security ID: TICKER" value anywhere in the row
+        // 1. Detect "Security ID: TICKER" row
         let secId = null;
-        for (const v of Object.values(r)) {
-          const s = String(v || '').trim();
+        for (const s of vals) {
           if (/^Security ID:\s*/i.test(s)) {
             secId = s.replace(/^Security ID:\s*/i, '').trim().toUpperCase();
             break;
@@ -292,40 +291,77 @@
         }
         if (secId) {
           currentTicker = secId;
-          // Do not create a position from the header row itself; use the detail rows
-          continue;
+          continue; // header row only — do not create a position from it
         }
 
-        // Detail / holding row
-        let account = acctCol ? String(r[acctCol] || '').trim() : '';
-        // Fallback: look for any XXXX#### style account number
-        if (!account || account === 'None' || account === 'null') {
-          for (const v of Object.values(r)) {
-            const s = String(v || '').trim();
-            if (/^XXXX\d+/i.test(s) || /^[A-Z0-9]{4,}\d+$/.test(s)) {
-              account = s;
-              break;
-            }
+        // 2. Find account number (XXXX#### pattern)
+        let account = '';
+        for (const s of vals) {
+          if (/^XXXX\d+/i.test(s)) {
+            account = s.toUpperCase();
+            break;
           }
         }
-        if (!account || /total/i.test(account)) continue;
+        if (!account) continue; // not a detail holding row
+        if (/total/i.test(account)) continue;
 
-        let desc = descCol ? String(r[descCol] || '').trim() : '';
-        if (!desc) {
-          // try to find a long-ish name field
-          for (const v of Object.values(r)) {
-            const s = String(v || '').trim();
-            if (s.length > 8 && !/^\d/.test(s) && !/^XXXX/i.test(s) && !/Security ID/i.test(s)) {
-              desc = s;
-              break;
-            }
+        // 3. Find description (longest non-numeric, non-account, non-category text)
+        let desc = '';
+        for (const s of vals) {
+          if (s.length > 6 &&
+              !/^XXXX/i.test(s) &&
+              !/^\d+\.?\d*$/.test(s) &&
+              !/^(Equities|Fixed Income|Cash and Cash Equivalents|Multi-Asset|Other)$/i.test(s) &&
+              !/Security ID/i.test(s)) {
+            if (s.length > desc.length) desc = s;
           }
         }
 
-        let shares = qtyCol ? cleanNum(r[qtyCol]) : null;
-        let price = priceCol ? cleanNum(r[priceCol]) : null;
-        let mkt = valueCol ? cleanNum(r[valueCol]) : null;
-        if (mkt == null && price != null && shares != null) mkt = price * shares;
+        // 4. Extract numbers — Quantity is usually medium-sized, Value is the largest currency-like number
+        const nums = vals
+          .map(s => cleanNum(s))
+          .filter(n => n != null && !isNaN(n));
+
+        // Heuristic: market value is the largest absolute number that looks like dollars
+        // Quantity is often a smaller number (or equal for cash)
+        let mkt = null;
+        let shares = null;
+        let price = null;
+
+        if (nums.length >= 1) {
+          // Sort descending by absolute value
+          const sorted = [...nums].sort((a, b) => Math.abs(b) - Math.abs(a));
+          mkt = sorted[0];
+
+          // Try to find a reasonable quantity
+          // Prefer a number that is not the market value and is plausible as shares
+          for (const n of nums) {
+            if (n !== mkt && n > 0 && n < 1e7) {
+              // If price ≈ 1 (cash), quantity ≈ value
+              if (Math.abs(n - mkt) < 0.02 * Math.max(mkt, 1) && mkt > 10) {
+                shares = n; // cash-like
+                price = 1;
+              } else if (n < mkt * 2) { // quantity should generally be smaller than or near value
+                shares = n;
+              }
+            }
+          }
+          // Fallback: if only one useful number, treat as market value
+          if (shares == null && mkt != null) {
+            // for pure cash rows quantity often equals value
+            shares = mkt;
+            price = 1;
+          }
+        }
+
+        // Also try named columns if they were detected
+        if (cols) {
+          if (cols.qtyCol && cleanNum(r[cols.qtyCol]) != null) shares = cleanNum(r[cols.qtyCol]);
+          if (cols.valueCol && cleanNum(r[cols.valueCol]) != null) mkt = cleanNum(r[cols.valueCol]);
+          if (cols.priceCol && cleanNum(r[cols.priceCol]) != null) price = cleanNum(r[cols.priceCol]);
+          if (cols.descCol && r[cols.descCol]) desc = String(r[cols.descCol]).trim() || desc;
+          if (cols.acctCol && r[cols.acctCol]) account = String(r[cols.acctCol]).trim() || account;
+        }
 
         if ((shares == null || shares === 0) && (mkt == null || mkt === 0)) continue;
 
@@ -333,9 +369,15 @@
         if (/ACCRUED INTEREST/i.test(desc) && (mkt || 0) < 20) continue;
 
         let ticker = currentTicker || 'UNKNOWN';
-        let cat = catCol ? String(r[catCol] || '') : '';
+        let cat = '';
+        for (const s of vals) {
+          if (/^(Equities|Fixed Income|Cash and Cash Equivalents|Multi-Asset|Other)$/i.test(s)) {
+            cat = s;
+            break;
+          }
+        }
 
-        // Normalize ticker / asset type for cash & special instruments
+        // Normalize ticker / asset type
         let asset = 'Equity';
         if (/Cash and Cash Equivalents|cash|fdic|money market|sweep/i.test(cat + ' ' + desc)) {
           asset = 'Cash';
@@ -346,11 +388,12 @@
           else ticker = 'CASH';
         } else if (/Fixed Income/i.test(cat)) {
           asset = 'Fixed Income';
-        } else if (/Multi-Asset|Other/i.test(cat)) {
-          asset = /Multi-Asset/i.test(cat) ? 'Multi-Asset' : 'Other';
+        } else if (/Multi-Asset/i.test(cat)) {
+          asset = 'Multi-Asset';
+        } else if (/Other/i.test(cat)) {
+          asset = 'Other';
         }
 
-        // Clean ticker for display (CUSIPs stay as-is; cash already handled)
         if (ticker === 'CASH SWEEP') ticker = 'CASH';
 
         out.push({
@@ -361,7 +404,7 @@
           shares,
           last_price: price,
           market_value: mkt,
-          cost_basis: null,          // this Baird export does not include cost basis
+          cost_basis: null,
           unrealized_gl: null,
           asset_type: asset,
           source_file: sourceName
