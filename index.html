@@ -182,13 +182,13 @@
 
     function parseRows(rows, headers, broker, sourceName) {
       if (!rows || !rows.length) return [];
+
       // Skip junk header rows (E*TRADE style)
       let start = 0;
       for (let i = 0; i < Math.min(6, rows.length); i++) {
         const joined = Object.values(rows[i] || {}).join(' ').toLowerCase();
-        if (joined.includes('symbol') || joined.includes('ticker') || joined.includes('quantity')) {
+        if (joined.includes('symbol') || joined.includes('ticker') || joined.includes('quantity') || joined.includes('security name')) {
           if (i > 0) {
-            // re-header
             headers = Object.values(rows[i]);
             start = i + 1;
           }
@@ -204,6 +204,22 @@
       const glCol = findCol(headers, GL_CANDS);
       const acctCol = findCol(headers, ACCT_CANDS);
       const descCol = findCol(headers, DESC_CANDS);
+      const catCol = findCol(headers, ['assetcategory', 'asset category', 'category', 'assetclass']);
+
+      // ---------- Special handler: RW Baird (and similar) "Security ID: TICKER" format ----------
+      // Baird exports put the ticker/CUSIP in a header row "Security ID: AAPL"
+      // and the actual holdings (account, name, qty, value) on the following rows.
+      const looksLikeBaird = !tickerCol && (
+        (descCol && /security.?name/i.test(descCol)) ||
+        headers.some(h => /security.?name/i.test(String(h || ''))) ||
+        rows.some(r => Object.values(r || {}).some(v => String(v || '').startsWith('Security ID:')))
+      );
+
+      if (looksLikeBaird || (broker && broker.toLowerCase().includes('baird'))) {
+        return parseBairdStyle(rows, headers, broker || 'RW Baird', sourceName, {
+          qtyCol, valueCol, priceCol, acctCol, descCol, catCol
+        });
+      }
 
       if (!tickerCol) {
         toast('No ticker/symbol column found');
@@ -250,6 +266,104 @@
           broker, account, ticker, description: desc,
           shares: shares, last_price: price, market_value: mkt,
           cost_basis: cost, unrealized_gl: gl, asset_type: asset,
+          source_file: sourceName
+        });
+      }
+      return out;
+    }
+
+    // RW Baird (and similar custodians) put the identifier in "Security ID: XXX" rows
+    function parseBairdStyle(rows, headers, broker, sourceName, cols) {
+      const { qtyCol, valueCol, priceCol, acctCol, descCol, catCol } = cols;
+      let currentTicker = null;
+      const out = [];
+
+      for (const r of rows) {
+        if (!r) continue;
+
+        // Look for a "Security ID: TICKER" value anywhere in the row
+        let secId = null;
+        for (const v of Object.values(r)) {
+          const s = String(v || '').trim();
+          if (/^Security ID:\s*/i.test(s)) {
+            secId = s.replace(/^Security ID:\s*/i, '').trim().toUpperCase();
+            break;
+          }
+        }
+        if (secId) {
+          currentTicker = secId;
+          // Do not create a position from the header row itself; use the detail rows
+          continue;
+        }
+
+        // Detail / holding row
+        let account = acctCol ? String(r[acctCol] || '').trim() : '';
+        // Fallback: look for any XXXX#### style account number
+        if (!account || account === 'None' || account === 'null') {
+          for (const v of Object.values(r)) {
+            const s = String(v || '').trim();
+            if (/^XXXX\d+/i.test(s) || /^[A-Z0-9]{4,}\d+$/.test(s)) {
+              account = s;
+              break;
+            }
+          }
+        }
+        if (!account || /total/i.test(account)) continue;
+
+        let desc = descCol ? String(r[descCol] || '').trim() : '';
+        if (!desc) {
+          // try to find a long-ish name field
+          for (const v of Object.values(r)) {
+            const s = String(v || '').trim();
+            if (s.length > 8 && !/^\d/.test(s) && !/^XXXX/i.test(s) && !/Security ID/i.test(s)) {
+              desc = s;
+              break;
+            }
+          }
+        }
+
+        let shares = qtyCol ? cleanNum(r[qtyCol]) : null;
+        let price = priceCol ? cleanNum(r[priceCol]) : null;
+        let mkt = valueCol ? cleanNum(r[valueCol]) : null;
+        if (mkt == null && price != null && shares != null) mkt = price * shares;
+
+        if ((shares == null || shares === 0) && (mkt == null || mkt === 0)) continue;
+
+        // Skip tiny accrued-interest lines
+        if (/ACCRUED INTEREST/i.test(desc) && (mkt || 0) < 20) continue;
+
+        let ticker = currentTicker || 'UNKNOWN';
+        let cat = catCol ? String(r[catCol] || '') : '';
+
+        // Normalize ticker / asset type for cash & special instruments
+        let asset = 'Equity';
+        if (/Cash and Cash Equivalents|cash|fdic|money market|sweep/i.test(cat + ' ' + desc)) {
+          asset = 'Cash';
+          if (/VANGUARD FEDERAL MONEY MARKET/i.test(desc)) ticker = 'VMFXX';
+          else if (/FDIC INSURED/i.test(desc)) ticker = 'CASH';
+          else if (/ACCRUED/i.test(desc)) ticker = 'ACCRUED';
+          else if (currentTicker && currentTicker !== 'CASH SWEEP') ticker = currentTicker;
+          else ticker = 'CASH';
+        } else if (/Fixed Income/i.test(cat)) {
+          asset = 'Fixed Income';
+        } else if (/Multi-Asset|Other/i.test(cat)) {
+          asset = /Multi-Asset/i.test(cat) ? 'Multi-Asset' : 'Other';
+        }
+
+        // Clean ticker for display (CUSIPs stay as-is; cash already handled)
+        if (ticker === 'CASH SWEEP') ticker = 'CASH';
+
+        out.push({
+          broker: broker || 'RW Baird',
+          account,
+          ticker,
+          description: desc,
+          shares,
+          last_price: price,
+          market_value: mkt,
+          cost_basis: null,          // this Baird export does not include cost basis
+          unrealized_gl: null,
+          asset_type: asset,
           source_file: sourceName
         });
       }
