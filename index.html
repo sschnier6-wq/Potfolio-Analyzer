@@ -1,0 +1,776 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0f172a" />
+  <title>Portfolio Analyzer</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <style>
+    :root { color-scheme: dark; }
+    body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+    .card { background: #1e293b; border-radius: 1rem; border: 1px solid #334155; }
+    .metric { background: #1e293b; border-radius: 0.75rem; padding: 0.85rem 0.75rem; text-align: center; border: 1px solid #334155; }
+    .metric .label { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; }
+    .metric .value { font-size: 1.15rem; font-weight: 700; margin-top: 0.15rem; }
+    .tab-btn { flex: 1; padding: 0.65rem 0.25rem; font-size: 0.78rem; font-weight: 600; color: #94a3b8; border-bottom: 2px solid transparent; }
+    .tab-btn.active { color: #38bdf8; border-bottom-color: #38bdf8; }
+    .loss { color: #f87171; }
+    .gain { color: #4ade80; }
+    input, select, button { -webkit-appearance: none; appearance: none; }
+    .upload-zone { border: 2px dashed #475569; border-radius: 1rem; padding: 1.5rem 1rem; text-align: center; transition: all 0.2s; }
+    .upload-zone.drag { border-color: #38bdf8; background: #0c4a6e33; }
+    table { font-size: 0.8rem; }
+    th { position: sticky; top: 0; background: #1e293b; z-index: 1; }
+    .scroll-x { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    #toast { position: fixed; bottom: 5.5rem; left: 50%; transform: translateX(-50%); background: #0ea5e9; color: white; padding: 0.6rem 1.2rem; border-radius: 9999px; font-size: 0.85rem; font-weight: 600; z-index: 50; display: none; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col">
+
+  <!-- Header -->
+  <header class="sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-700 px-4 py-3">
+    <div class="flex items-center justify-between">
+      <div>
+        <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready</p>
+      </div>
+      <button id="btnClear" class="text-xs text-slate-400 border border-slate-600 rounded-lg px-2.5 py-1.5 hidden">Clear</button>
+    </div>
+  </header>
+
+  <!-- Main -->
+  <main class="flex-1 px-3 py-3 pb-24 max-w-lg mx-auto w-full">
+
+    <!-- Upload Section (shown when empty) -->
+    <section id="uploadSection">
+      <div class="upload-zone mb-4" id="dropZone">
+        <p class="text-sky-400 font-semibold mb-1">Tap to upload holdings</p>
+        <p class="text-xs text-slate-400 mb-3">CSV or Excel from Fidelity, E*TRADE, Capital One, Baird, etc.</p>
+        <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,.txt" multiple class="hidden" />
+        <button onclick="document.getElementById('fileInput').click()" class="bg-sky-600 hover:bg-sky-500 text-white text-sm font-semibold px-4 py-2 rounded-xl">
+          Choose Files
+        </button>
+      </div>
+
+      <div class="card p-4 mb-4">
+        <h2 class="font-semibold text-sm mb-2 text-slate-200">How to export</h2>
+        <ul class="text-xs text-slate-400 space-y-1.5">
+          <li><span class="text-sky-400 font-medium">Fidelity:</span> Positions → Download CSV</li>
+          <li><span class="text-sky-400 font-medium">E*TRADE:</span> Portfolio → Download → CSV</li>
+          <li><span class="text-sky-400 font-medium">Capital One / others:</span> Holdings → Export CSV/Excel</li>
+          <li><span class="text-sky-400 font-medium">RW Baird:</span> Holdings → Export Excel (best)</li>
+        </ul>
+        <p class="text-xs text-slate-500 mt-3">Everything stays on your phone. No data is uploaded to any server.</p>
+      </div>
+
+      <div class="card p-4">
+        <h2 class="font-semibold text-sm mb-2">Try sample data</h2>
+        <div class="flex flex-wrap gap-2">
+          <button onclick="loadSample('fidelity')" class="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg">Fidelity sample</button>
+          <button onclick="loadSample('etrade')" class="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg">E*TRADE sample</button>
+          <button onclick="loadSample('generic')" class="text-xs bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg">Generic sample</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Dashboard (hidden until data loaded) -->
+    <section id="dashboard" class="hidden">
+      <!-- Metrics -->
+      <div class="grid grid-cols-2 gap-2 mb-3" id="metrics"></div>
+
+      <!-- Tabs -->
+      <div class="flex border-b border-slate-700 mb-3 sticky top-14 bg-slate-900 z-30 -mx-3 px-3">
+        <button class="tab-btn active" data-tab="overview">Overview</button>
+        <button class="tab-btn" data-tab="positions">Positions</button>
+        <button class="tab-btn" data-tab="overlap">Overlap</button>
+        <button class="tab-btn" data-tab="tlh">Tax Loss</button>
+      </div>
+
+      <!-- Tab panels -->
+      <div id="panel-overview" class="tab-panel"></div>
+      <div id="panel-positions" class="tab-panel hidden"></div>
+      <div id="panel-overlap" class="tab-panel hidden"></div>
+      <div id="panel-tlh" class="tab-panel hidden"></div>
+    </section>
+  </main>
+
+  <!-- Bottom settings bar -->
+  <div class="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur border-t border-slate-700 px-4 py-2 safe-bottom z-40">
+    <div class="max-w-lg mx-auto flex items-center gap-3 text-xs">
+      <label class="flex items-center gap-1.5 text-slate-400">
+        Tax rate
+        <input type="number" id="taxRate" value="37" min="0" max="50" step="1" class="w-12 bg-slate-800 border border-slate-600 rounded px-1.5 py-1 text-center text-sky-300" />
+        %
+      </label>
+      <label class="flex items-center gap-1.5 text-slate-400">
+        Min loss $
+        <input type="number" id="minLoss" value="100" min="0" step="50" class="w-16 bg-slate-800 border border-slate-600 rounded px-1.5 py-1 text-center text-sky-300" />
+      </label>
+      <button id="btnExport" class="ml-auto text-sky-400 font-semibold hidden">Export CSV</button>
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <script>
+    // ========== State ==========
+    let holdings = [];   // array of position objects
+    let currentTab = 'overview';
+
+    // ========== Helpers ==========
+    const $ = (sel) => document.querySelector(sel);
+    const $$ = (sel) => document.querySelectorAll(sel);
+
+    function toast(msg, ms = 2200) {
+      const t = $('#toast');
+      t.textContent = msg;
+      t.style.display = 'block';
+      setTimeout(() => t.style.display = 'none', ms);
+    }
+
+    function fmt(n, d = 0) {
+      if (n == null || isNaN(n)) return '—';
+      return n.toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+    }
+    function fmtMoney(n) {
+      if (n == null || isNaN(n)) return '—';
+      const sign = n < 0 ? '-' : '';
+      return sign + '$' + Math.abs(n).toLocaleString('en-US', { maximumFractionDigits: 0 });
+    }
+    function cleanNum(v) {
+      if (v == null || v === '') return null;
+      if (typeof v === 'number') return v;
+      let s = String(v).trim().replace(/[$,]/g, '').replace(/\((.*)\)/, '-$1').replace(/%/, '');
+      if (s === '' || s === '--' || s === 'N/A' || s.toLowerCase() === 'nan') return null;
+      const n = parseFloat(s);
+      return isNaN(n) ? null : n;
+    }
+    function norm(s) {
+      return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    }
+
+    // ========== Column detection ==========
+    const TICKER_CANDS = ['symbol','ticker','sym','securitysymbol','tickersymbol','security','investment','holding'];
+    const QTY_CANDS = ['quantity','qty','shares','units','sharequantity','position','numberofshares'];
+    const COST_CANDS = ['costbasistotal','costbasis','totalcost','cost','basis','pricepaid','avgcost','averagecost','acquisitioncost','totalcostbasis'];
+    const VALUE_CANDS = ['currentvalue','marketvalue','value','value$','marketvalue$','currentmarketvalue','mktvalue','positionvalue'];
+    const PRICE_CANDS = ['lastprice','price','lastprice$','currentprice','marketprice','last','close'];
+    const GL_CANDS = ['totalgainlossdollar','totalgain$','totalgainloss$','unrealizedgainloss$','unrealizedgainlossdollar','gainloss$','totalgaindollar','totalgainloss','unrealizedgainloss','gainloss','unrealizedgl','totalgain'];
+    const ACCT_CANDS = ['accountname','account','accountnumber','accountid','acctname'];
+    const DESC_CANDS = ['description','securityname','name','securitydescription','company'];
+
+    function findCol(headers, cands) {
+      const map = {};
+      headers.forEach(h => map[norm(h)] = h);
+      for (const c of cands) {
+        if (map[c]) return map[c];
+      }
+      for (const c of cands) {
+        for (const [k, orig] of Object.entries(map)) {
+          if (k.includes(c) || c.includes(k)) return orig;
+        }
+      }
+      return null;
+    }
+
+    function parseRows(rows, headers, broker, sourceName) {
+      if (!rows || !rows.length) return [];
+      // Skip junk header rows (E*TRADE style)
+      let start = 0;
+      for (let i = 0; i < Math.min(6, rows.length); i++) {
+        const joined = Object.values(rows[i] || {}).join(' ').toLowerCase();
+        if (joined.includes('symbol') || joined.includes('ticker') || joined.includes('quantity')) {
+          if (i > 0) {
+            // re-header
+            headers = Object.values(rows[i]);
+            start = i + 1;
+          }
+          break;
+        }
+      }
+
+      const tickerCol = findCol(headers, TICKER_CANDS);
+      const qtyCol = findCol(headers, QTY_CANDS);
+      const costCol = findCol(headers, COST_CANDS);
+      const valueCol = findCol(headers, VALUE_CANDS);
+      const priceCol = findCol(headers, PRICE_CANDS);
+      const glCol = findCol(headers, GL_CANDS);
+      const acctCol = findCol(headers, ACCT_CANDS);
+      const descCol = findCol(headers, DESC_CANDS);
+
+      if (!tickerCol) {
+        toast('No ticker/symbol column found');
+        return [];
+      }
+
+      const out = [];
+      for (let i = start; i < rows.length; i++) {
+        const r = rows[i];
+        if (!r) continue;
+        let ticker = String(r[tickerCol] || '').trim().toUpperCase();
+        if (!ticker || ticker === 'NAN' || /TOTAL|GRAND|CASH.*BALANCE/i.test(ticker)) continue;
+
+        let shares = qtyCol ? cleanNum(r[qtyCol]) : null;
+        let cost = costCol ? cleanNum(r[costCol]) : null;
+        let mkt = valueCol ? cleanNum(r[valueCol]) : null;
+        let price = priceCol ? cleanNum(r[priceCol]) : null;
+        let gl = glCol ? cleanNum(r[glCol]) : null;
+        let account = acctCol ? String(r[acctCol] || 'Unknown').trim() : 'Unknown';
+        let desc = descCol ? String(r[descCol] || '').trim() : '';
+
+        // Unit cost → total (E*TRADE "Price Paid $")
+        if (costCol && cost != null && shares != null && shares > 1) {
+          const cn = norm(costCol);
+          if (cn.includes('pricepaid') || cn.includes('avgcost') || cn.includes('averagecost')) {
+            cost = cost * shares;
+          }
+        }
+
+        if (mkt == null && price != null && shares != null) mkt = price * shares;
+        if (gl == null && mkt != null && cost != null) gl = mkt - cost;
+
+        // If GL looks like a percent, recompute
+        if (gl != null && mkt != null && cost != null && Math.abs(gl) < 200 && Math.abs(mkt - cost) > 500) {
+          gl = mkt - cost;
+        }
+
+        if ((shares == null || shares === 0) && (mkt == null || mkt === 0)) continue;
+
+        let asset = 'Equity';
+        if (/^(?:CASH|SPAXX|FDRXX|VMFXX|SWVXX|USD|FCASH)/i.test(ticker)) asset = 'Cash';
+
+        out.push({
+          broker, account, ticker, description: desc,
+          shares: shares, last_price: price, market_value: mkt,
+          cost_basis: cost, unrealized_gl: gl, asset_type: asset,
+          source_file: sourceName
+        });
+      }
+      return out;
+    }
+
+    // ========== File loading ==========
+    function handleFiles(files) {
+      if (!files || !files.length) return;
+      let pending = files.length;
+      const allNew = [];
+
+      Array.from(files).forEach(file => {
+        const name = file.name.toLowerCase();
+        const broker = detectBroker(name) || 'Generic';
+
+        if (name.endsWith('.csv') || name.endsWith('.txt')) {
+          Papa.parse(file, {
+            header: true,
+            skipEmptyLines: true,
+            complete: (res) => {
+              const parsed = parseRows(res.data, res.meta.fields || [], broker, file.name);
+              allNew.push(...parsed);
+              pending--;
+              if (pending === 0) finishLoad(allNew);
+            },
+            error: () => { pending--; if (pending === 0) finishLoad(allNew); }
+          });
+        } else if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            try {
+              const wb = XLSX.read(e.target.result, { type: 'array' });
+              const ws = wb.Sheets[wb.SheetNames[0]];
+              const json = XLSX.utils.sheet_to_json(ws, { defval: '' });
+              const headers = json.length ? Object.keys(json[0]) : [];
+              const parsed = parseRows(json, headers, broker, file.name);
+              allNew.push(...parsed);
+            } catch (err) {
+              toast('Excel parse error');
+            }
+            pending--;
+            if (pending === 0) finishLoad(allNew);
+          };
+          reader.readAsArrayBuffer(file);
+        } else {
+          toast('Use CSV or Excel files');
+          pending--;
+          if (pending === 0) finishLoad(allNew);
+        }
+      });
+    }
+
+    function detectBroker(filename) {
+      const f = filename.toLowerCase();
+      if (f.includes('fidelity')) return 'Fidelity';
+      if (f.includes('etrade') || f.includes('e*trade') || f.includes('morgan')) return 'E*TRADE';
+      if (f.includes('baird')) return 'RW Baird';
+      if (f.includes('capital') || f.includes('c1')) return 'Capital One';
+      if (f.includes('schwab')) return 'Schwab';
+      if (f.includes('vanguard')) return 'Vanguard';
+      return 'Generic';
+    }
+
+    function finishLoad(newRows) {
+      if (!newRows.length) {
+        toast('No positions found in file(s)');
+        return;
+      }
+      // Merge, prefer newer for same key
+      const key = (p) => `${p.broker}|${p.account}|${p.ticker}|${p.shares}`;
+      const map = new Map(holdings.map(p => [key(p), p]));
+      newRows.forEach(p => map.set(key(p), p));
+      holdings = Array.from(map.values());
+      saveState();
+      renderAll();
+      toast(`Loaded ${newRows.length} positions`);
+    }
+
+    // ========== Samples (embedded so app works offline after first load) ==========
+    const SAMPLES = {
+      fidelity: `Account Number,Account Name,Symbol,Description,Quantity,Last Price,Current Value,Today's Gain/Loss Dollar,Total Gain/Loss Dollar,Cost Basis Total
+X12345678,Individual Brokerage,AAPL,APPLE INC,50.000,210.50,10525.00,125.00,1525.00,9000.00
+X12345678,Individual Brokerage,MSFT,MICROSOFT CORP,30.000,420.00,12600.00,60.00,2100.00,10500.00
+X12345678,Individual Brokerage,VTI,VANGUARD TOTAL STOCK MKT ETF,100.000,265.00,26500.00,50.00,1500.00,25000.00
+X12345678,Individual Brokerage,SPAXX,FIDELITY GOVERNMENT MONEY MARKET,1523.45,1.00,1523.45,0.00,0.00,1523.45
+Y98765432,Roth IRA,AAPL,APPLE INC,25.000,210.50,5262.50,62.50,762.50,4500.00
+Y98765432,Roth IRA,GOOGL,ALPHABET INC CLASS A,40.000,175.00,7000.00,-40.00,-800.00,7800.00
+Y98765432,Roth IRA,VXUS,VANGUARD TOTAL INTERNATIONAL STOCK ETF,80.000,62.50,5000.00,20.00,200.00,4800.00`,
+      etrade: `Symbol,Last Price $,Change $,Change %,Quantity,Price Paid $,Day's Gain $,Total Gain $,Total Gain %,Value $
+AAPL,210.50,2.50,1.20,20.0000,180.00,50.00,610.00,16.94,4210.00
+TSLA,250.00,-5.00,-1.96,15.0000,280.00,-75.00,-450.00,-10.71,3750.00
+QQQ,480.00,1.20,0.25,10.0000,450.00,12.00,300.00,6.67,4800.00
+CASH,1.00,0.00,0.00,1250.00,1.00,0.00,0.00,0.00,1250.00`,
+      generic: `Ticker,Shares,Avg Cost,Market Value,Account
+NVDA,10,450.00,12000.00,Capital One Investing
+AMZN,5,180.00,950.00,Capital One Investing
+VTI,50,240.00,13250.00,Capital One Investing`
+    };
+
+    function loadSample(key) {
+      const text = SAMPLES[key];
+      const broker = key === 'fidelity' ? 'Fidelity' : key === 'etrade' ? 'E*TRADE' : 'Capital One';
+      Papa.parse(text, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (res) => {
+          const parsed = parseRows(res.data, res.meta.fields || [], broker, key + '_sample.csv');
+          finishLoad(parsed);
+        }
+      });
+    }
+
+    // ========== Analysis ==========
+    function consolidated() {
+      const map = {};
+      holdings.forEach(p => {
+        if (!map[p.ticker]) {
+          map[p.ticker] = {
+            ticker: p.ticker, description: p.description,
+            total_shares: 0, total_value: 0, total_cost: 0, total_gl: 0,
+            accounts: new Set(), brokers: new Set()
+          };
+        }
+        const c = map[p.ticker];
+        c.total_shares += p.shares || 0;
+        c.total_value += p.market_value || 0;
+        c.total_cost += p.cost_basis || 0;
+        c.total_gl += p.unrealized_gl || 0;
+        c.accounts.add(p.account);
+        c.brokers.add(p.broker);
+      });
+      const total = Object.values(map).reduce((s, x) => s + x.total_value, 0) || 1;
+      return Object.values(map)
+        .map(c => ({
+          ...c,
+          n_accounts: c.accounts.size,
+          accounts_str: [...c.accounts].sort().join(', '),
+          weight: (c.total_value / total) * 100
+        }))
+        .sort((a, b) => b.total_value - a.total_value);
+    }
+
+    function sharedTickers() {
+      const byTicker = {};
+      holdings.forEach(p => {
+        if (!byTicker[p.ticker]) byTicker[p.ticker] = new Set();
+        byTicker[p.ticker].add(p.account);
+      });
+      return Object.entries(byTicker)
+        .filter(([, accts]) => accts.size > 1)
+        .map(([ticker, accts]) => {
+          const rows = holdings.filter(p => p.ticker === ticker);
+          return {
+            ticker,
+            n_accounts: accts.size,
+            accounts: [...accts].sort().join(' | '),
+            total_value: rows.reduce((s, r) => s + (r.market_value || 0), 0),
+            total_gl: rows.reduce((s, r) => s + (r.unrealized_gl || 0), 0)
+          };
+        })
+        .sort((a, b) => b.total_value - a.total_value);
+    }
+
+    function tlhCandidates() {
+      const rate = (parseFloat($('#taxRate').value) || 37) / 100;
+      const minL = parseFloat($('#minLoss').value) || 100;
+      return holdings
+        .filter(p => p.unrealized_gl != null && p.unrealized_gl < -Math.abs(minL))
+        .map(p => ({
+          ...p,
+          est_savings: -p.unrealized_gl * rate,
+          loss_pct: p.cost_basis ? (p.unrealized_gl / p.cost_basis) * 100 : null
+        }))
+        .sort((a, b) => a.unrealized_gl - b.unrealized_gl);
+    }
+
+    // ========== Render ==========
+    function renderAll() {
+      if (!holdings.length) {
+        $('#uploadSection').classList.remove('hidden');
+        $('#dashboard').classList.add('hidden');
+        $('#btnClear').classList.add('hidden');
+        $('#btnExport').classList.add('hidden');
+        return;
+      }
+      $('#uploadSection').classList.add('hidden');
+      $('#dashboard').classList.remove('hidden');
+      $('#btnClear').classList.remove('hidden');
+      $('#btnExport').classList.remove('hidden');
+
+      const totalVal = holdings.reduce((s, p) => s + (p.market_value || 0), 0);
+      const totalCost = holdings.reduce((s, p) => s + (p.cost_basis || 0), 0);
+      const totalGL = holdings.reduce((s, p) => s + (p.unrealized_gl || 0), 0);
+      const nTickers = new Set(holdings.map(p => p.ticker)).size;
+      const nAccts = new Set(holdings.map(p => p.account)).size;
+
+      $('#metrics').innerHTML = `
+        <div class="metric"><div class="label">Market Value</div><div class="value text-sky-300">${fmtMoney(totalVal)}</div></div>
+        <div class="metric"><div class="label">Cost Basis</div><div class="value">${fmtMoney(totalCost)}</div></div>
+        <div class="metric"><div class="label">Unrealized G/L</div><div class="value ${totalGL >= 0 ? 'gain' : 'loss'}">${fmtMoney(totalGL)}</div></div>
+        <div class="metric"><div class="label">Tickers / Accts</div><div class="value">${nTickers} / ${nAccts}</div></div>
+      `;
+
+      renderOverview();
+      renderPositions();
+      renderOverlap();
+      renderTLH();
+      showTab(currentTab);
+    }
+
+    function renderOverview() {
+      const cons = consolidated().slice(0, 12);
+      const byAcct = {};
+      holdings.forEach(p => {
+        byAcct[p.account] = (byAcct[p.account] || 0) + (p.market_value || 0);
+      });
+      const acctLabels = Object.keys(byAcct);
+      const acctVals = Object.values(byAcct);
+
+      let html = `
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold mb-2 text-slate-300">Allocation by Account</h3>
+          <div id="chartAcct" style="height:220px"></div>
+        </div>
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold mb-2 text-slate-300">Top Holdings</h3>
+          <div id="chartTop" style="height:280px"></div>
+        </div>
+        <div class="card p-3">
+          <h3 class="text-sm font-semibold mb-2 text-slate-300">Holdings Summary</h3>
+          <div class="scroll-x">
+            <table class="w-full text-left">
+              <thead><tr class="text-slate-400 text-xs">
+                <th class="py-1.5 pr-2">Ticker</th>
+                <th class="py-1.5 pr-2 text-right">Value</th>
+                <th class="py-1.5 pr-2 text-right">G/L</th>
+                <th class="py-1.5 text-right">Wt%</th>
+              </tr></thead>
+              <tbody>
+                ${cons.map(c => `
+                  <tr class="border-t border-slate-700">
+                    <td class="py-1.5 pr-2 font-medium text-sky-300">${c.ticker}</td>
+                    <td class="py-1.5 pr-2 text-right">${fmtMoney(c.total_value)}</td>
+                    <td class="py-1.5 pr-2 text-right ${c.total_gl >= 0 ? 'gain' : 'loss'}">${fmtMoney(c.total_gl)}</td>
+                    <td class="py-1.5 text-right">${fmt(c.weight, 1)}%</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+      $('#panel-overview').innerHTML = html;
+
+      // Charts (mobile-friendly)
+      setTimeout(() => {
+        if (acctLabels.length) {
+          Plotly.newPlot('chartAcct', [{
+            values: acctVals, labels: acctLabels, type: 'pie',
+            hole: 0.45, textinfo: 'percent',
+            marker: { colors: ['#0ea5e9','#8b5cf6','#f59e0b','#10b981','#f43f5e','#6366f1'] }
+          }], {
+            margin: { t: 10, b: 10, l: 10, r: 10 },
+            paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+            font: { color: '#94a3b8', size: 11 },
+            showlegend: true, legend: { orientation: 'h', y: -0.15 }
+          }, { responsive: true, displayModeBar: false });
+        }
+        if (cons.length) {
+          Plotly.newPlot('chartTop', [{
+            x: cons.map(c => c.ticker),
+            y: cons.map(c => c.total_value),
+            type: 'bar',
+            marker: { color: '#0ea5e9' }
+          }], {
+            margin: { t: 10, b: 40, l: 50, r: 10 },
+            paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+            font: { color: '#94a3b8', size: 10 },
+            xaxis: { tickangle: -35 },
+            yaxis: { title: '' }
+          }, { responsive: true, displayModeBar: false });
+        }
+      }, 50);
+    }
+
+    function renderPositions() {
+      const cons = consolidated();
+      let html = `
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold mb-2">By Ticker (all accounts)</h3>
+          <div class="scroll-x max-h-64 overflow-y-auto">
+            <table class="w-full text-left">
+              <thead><tr class="text-slate-400 text-xs">
+                <th class="py-1.5 pr-2">Ticker</th>
+                <th class="py-1.5 pr-2 text-right">Shares</th>
+                <th class="py-1.5 pr-2 text-right">Value</th>
+                <th class="py-1.5 text-right">#Accts</th>
+              </tr></thead>
+              <tbody>
+                ${cons.map(c => `
+                  <tr class="border-t border-slate-700">
+                    <td class="py-1.5 pr-2 font-medium text-sky-300">${c.ticker}</td>
+                    <td class="py-1.5 pr-2 text-right">${fmt(c.total_shares, 2)}</td>
+                    <td class="py-1.5 pr-2 text-right">${fmtMoney(c.total_value)}</td>
+                    <td class="py-1.5 text-right">${c.n_accounts}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card p-3">
+          <h3 class="text-sm font-semibold mb-2">Individual Positions</h3>
+          <div class="scroll-x max-h-80 overflow-y-auto">
+            <table class="w-full text-left">
+              <thead><tr class="text-slate-400 text-xs">
+                <th class="py-1.5 pr-2">Ticker</th>
+                <th class="py-1.5 pr-2">Account</th>
+                <th class="py-1.5 pr-2 text-right">Value</th>
+                <th class="py-1.5 text-right">G/L</th>
+              </tr></thead>
+              <tbody>
+                ${holdings
+                  .slice()
+                  .sort((a,b) => (b.market_value||0) - (a.market_value||0))
+                  .map(p => `
+                  <tr class="border-t border-slate-700">
+                    <td class="py-1.5 pr-2 font-medium text-sky-300">${p.ticker}</td>
+                    <td class="py-1.5 pr-2 text-xs text-slate-400 truncate max-w-[90px]">${p.account}</td>
+                    <td class="py-1.5 pr-2 text-right">${fmtMoney(p.market_value)}</td>
+                    <td class="py-1.5 text-right ${ (p.unrealized_gl||0) >= 0 ? 'gain' : 'loss'}">${fmtMoney(p.unrealized_gl)}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      `;
+      $('#panel-positions').innerHTML = html;
+    }
+
+    function renderOverlap() {
+      const shared = sharedTickers();
+      let html = '';
+      if (!shared.length) {
+        html = `<div class="card p-4 text-center text-slate-400 text-sm">No overlapping tickers across accounts. Nice!</div>`;
+      } else {
+        html = `
+          <div class="card p-3 mb-3">
+            <p class="text-sm text-slate-300 mb-2"><span class="text-sky-400 font-bold">${shared.length}</span> tickers appear in more than one account.</p>
+            <div class="scroll-x">
+              <table class="w-full text-left">
+                <thead><tr class="text-slate-400 text-xs">
+                  <th class="py-1.5 pr-2">Ticker</th>
+                  <th class="py-1.5 pr-2">Accounts</th>
+                  <th class="py-1.5 text-right">Value</th>
+                </tr></thead>
+                <tbody>
+                  ${shared.map(s => `
+                    <tr class="border-t border-slate-700">
+                      <td class="py-1.5 pr-2 font-medium text-sky-300">${s.ticker}</td>
+                      <td class="py-1.5 pr-2 text-xs text-slate-400">${s.accounts}</td>
+                      <td class="py-1.5 text-right">${fmtMoney(s.total_value)}</td>
+                    </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }
+
+      // Concentration
+      const cons = consolidated();
+      const top5 = cons.slice(0,5).reduce((s,c) => s + c.weight, 0);
+      const top10 = cons.slice(0,10).reduce((s,c) => s + c.weight, 0);
+      const hhi = cons.reduce((s,c) => s + Math.pow(c.weight/100, 2), 0) * 10000;
+
+      html += `
+        <div class="card p-3">
+          <h3 class="text-sm font-semibold mb-3 text-slate-300">Concentration</h3>
+          <div class="grid grid-cols-3 gap-2 text-center">
+            <div><div class="text-xs text-slate-400">Top 5</div><div class="text-lg font-bold text-sky-300">${fmt(top5,1)}%</div></div>
+            <div><div class="text-xs text-slate-400">Top 10</div><div class="text-lg font-bold text-sky-300">${fmt(top10,1)}%</div></div>
+            <div><div class="text-xs text-slate-400">HHI</div><div class="text-lg font-bold text-sky-300">${fmt(hhi,0)}</div></div>
+          </div>
+          <p class="text-xs text-slate-500 mt-2">HHI &lt; 1500 = diversified · &gt; 2500 = concentrated</p>
+        </div>
+      `;
+      $('#panel-overlap').innerHTML = html;
+    }
+
+    function renderTLH() {
+      const cands = tlhCandidates();
+      let html = `
+        <div class="card p-3 mb-3 text-xs text-slate-400">
+          Positions with unrealized losses. Estimates use the tax rate in the bottom bar.
+          <strong class="text-slate-300">Not tax advice</strong> — confirm with your CPA. Watch the 30-day wash-sale rule.
+        </div>
+      `;
+      if (!cands.length) {
+        html += `<div class="card p-4 text-center text-slate-400 text-sm">No losses above the minimum threshold found.</div>`;
+      } else {
+        const totalLoss = -cands.reduce((s,c) => s + c.unrealized_gl, 0);
+        const totalSave = cands.reduce((s,c) => s + c.est_savings, 0);
+        html += `
+          <div class="grid grid-cols-2 gap-2 mb-3">
+            <div class="metric"><div class="label">Harvestable</div><div class="value loss">${fmtMoney(totalLoss)}</div></div>
+            <div class="metric"><div class="label">Est. Tax Savings</div><div class="value text-amber-300">${fmtMoney(totalSave)}</div></div>
+          </div>
+          <div class="card p-3 mb-3">
+            <div class="scroll-x max-h-72 overflow-y-auto">
+              <table class="w-full text-left">
+                <thead><tr class="text-slate-400 text-xs">
+                  <th class="py-1.5 pr-2">Ticker</th>
+                  <th class="py-1.5 pr-2">Account</th>
+                  <th class="py-1.5 pr-2 text-right">Loss</th>
+                  <th class="py-1.5 text-right">Save≈</th>
+                </tr></thead>
+                <tbody>
+                  ${cands.map(c => `
+                    <tr class="border-t border-slate-700">
+                      <td class="py-1.5 pr-2 font-medium text-sky-300">${c.ticker}</td>
+                      <td class="py-1.5 pr-2 text-xs text-slate-400 truncate max-w-[80px]">${c.account}</td>
+                      <td class="py-1.5 pr-2 text-right loss">${fmtMoney(c.unrealized_gl)}</td>
+                      <td class="py-1.5 text-right text-amber-300">${fmtMoney(c.est_savings)}</td>
+                    </tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+        const top = cands[0];
+        html += `
+          <div class="card p-3 border-sky-700/50 bg-sky-950/30">
+            <p class="text-sm">
+              <span class="text-sky-400 font-semibold">Largest opportunity:</span>
+              Sell ${fmt(top.shares, 2)} shares of <strong>${top.ticker}</strong>
+              in “${top.account}” to realize a ${fmtMoney(-top.unrealized_gl)} loss
+              (≈ ${fmtMoney(top.est_savings)} tax savings).
+            </p>
+          </div>
+        `;
+      }
+      $('#panel-tlh').innerHTML = html;
+    }
+
+    function showTab(name) {
+      currentTab = name;
+      $$('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+      $$('.tab-panel').forEach(p => p.classList.add('hidden'));
+      const panel = $(`#panel-${name}`);
+      if (panel) panel.classList.remove('hidden');
+      // re-render charts if needed
+      if (name === 'overview' && holdings.length) renderOverview();
+    }
+
+    // ========== Persistence ==========
+    function saveState() {
+      try {
+        localStorage.setItem('portfolio_holdings_v1', JSON.stringify(holdings));
+      } catch (e) {}
+    }
+    function loadState() {
+      try {
+        const raw = localStorage.getItem('portfolio_holdings_v1');
+        if (raw) {
+          holdings = JSON.parse(raw);
+          if (holdings.length) renderAll();
+        }
+      } catch (e) {}
+    }
+
+    // ========== Events ==========
+    $('#fileInput').addEventListener('change', (e) => handleFiles(e.target.files));
+
+    const dropZone = $('#dropZone');
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drag');
+      handleFiles(e.dataTransfer.files);
+    });
+
+    $$('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => showTab(btn.dataset.tab));
+    });
+
+    $('#btnClear').addEventListener('click', () => {
+      if (confirm('Clear all loaded holdings?')) {
+        holdings = [];
+        saveState();
+        renderAll();
+        toast('Cleared');
+      }
+    });
+
+    $('#btnExport').addEventListener('click', () => {
+      if (!holdings.length) return;
+      const headers = ['broker','account','ticker','description','shares','last_price','market_value','cost_basis','unrealized_gl','asset_type','source_file'];
+      const csv = [headers.join(',')].concat(
+        holdings.map(p => headers.map(h => {
+          let v = p[h];
+          if (v == null) return '';
+          if (typeof v === 'string' && (v.includes(',') || v.includes('"'))) return `"${v.replace(/"/g,'""')}"`;
+          return v;
+        }).join(','))
+      ).join('\n');
+      const blob = new Blob([csv], { type: 'text/csv' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `portfolio_${new Date().toISOString().slice(0,10)}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('CSV exported');
+    });
+
+    $('#taxRate').addEventListener('change', () => { if (holdings.length) renderTLH(); });
+    $('#minLoss').addEventListener('change', () => { if (holdings.length) renderTLH(); });
+
+    // Init
+    loadState();
+  </script>
+</body>
+</html>
