@@ -40,7 +40,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v16</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v17</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -134,12 +134,14 @@
   <script>
     // ========== State ==========
     let holdings = [];   // array of position objects (all loaded files)
-    let activeSources = null; // null = all sources; Set of source_file names when filtering
+    let activeSources = null; // Set of enabled source_file names (empty Set = show nothing)
+    let knownSources = new Set(); // all source names we've ever seen this session
     let currentTab = 'overview';
 
     // Positions visible under the current file filter
     function viewHoldings() {
-      if (!activeSources || activeSources.size === 0) return holdings;
+      if (!activeSources) return holdings; // not initialized yet → show all
+      if (activeSources.size === 0) return []; // user turned everything off
       return holdings.filter(p => activeSources.has(p.source_file || 'Unknown'));
     }
 
@@ -978,35 +980,46 @@ VTI,50,240.00,13250.00,Capital One Investing`
         return;
       }
       bar.classList.remove('hidden');
+
+      // Initialize once; preserve user on/off toggles; only auto-enable truly new files
       if (!activeSources) {
         activeSources = new Set(sources);
+        sources.forEach(s => knownSources.add(s));
       } else {
-        // Keep previous selections that still exist; auto-enable newly added files
-        const prev = activeSources;
-        activeSources = new Set();
+        const next = new Set();
         sources.forEach(s => {
-          if (prev.has(s) || !prev.size) activeSources.add(s);
+          if (activeSources.has(s)) {
+            next.add(s); // still on
+          } else if (!knownSources.has(s)) {
+            next.add(s); // brand-new file → default on
+          }
+          // else: user turned this one off — stay off
+          knownSources.add(s);
         });
-        // New files (not in prev) → enable
-        sources.forEach(s => { if (!prev.has(s)) activeSources.add(s); });
-        if (activeSources.size === 0) sources.forEach(s => activeSources.add(s));
+        activeSources = next;
       }
 
-      chips.innerHTML = sources.map(s => {
+      chips.innerHTML = sources.map((s, idx) => {
         const on = activeSources.has(s);
         const count = holdings.filter(p => (p.source_file || 'Unknown') === s).length;
-        return `<button type="button" data-source="${s.replace(/"/g, '&quot;')}"
-          class="source-chip text-[11px] px-2.5 py-1 rounded-full border transition
-            ${on ? 'bg-sky-600/30 border-sky-500 text-sky-200' : 'bg-slate-800 border-slate-600 text-slate-500'}">
-          ${shortName(s)} <span class="opacity-70">(${count})</span>
+        return `<button type="button" data-src-idx="${idx}"
+          class="source-chip text-[11px] px-2.5 py-1.5 rounded-full border transition active:scale-95
+            ${on ? 'bg-sky-600/40 border-sky-400 text-sky-100' : 'bg-slate-800 border-slate-600 text-slate-500'}">
+          ${on ? '✓ ' : ''}${shortName(s)} <span class="opacity-70">(${count})</span>
         </button>`;
       }).join('') +
-      `<button type="button" id="chipAll" class="text-[11px] px-2.5 py-1 rounded-full border border-slate-600 text-slate-400">All</button>
-       <button type="button" id="chipNone" class="text-[11px] px-2.5 py-1 rounded-full border border-slate-600 text-slate-400">None</button>`;
+      `<button type="button" id="chipAll" class="text-[11px] px-2.5 py-1.5 rounded-full border border-slate-600 text-slate-300">All</button>
+       <button type="button" id="chipNone" class="text-[11px] px-2.5 py-1.5 rounded-full border border-slate-600 text-slate-300">None</button>`;
 
+      // Use index into sources[] to avoid filename attribute encoding issues
       chips.querySelectorAll('.source-chip').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const s = btn.getAttribute('data-source');
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const idx = parseInt(btn.getAttribute('data-src-idx'), 10);
+          const s = sources[idx];
+          if (!s) return;
+          if (!activeSources) activeSources = new Set(sources);
           if (activeSources.has(s)) activeSources.delete(s);
           else activeSources.add(s);
           renderAll();
@@ -1014,8 +1027,16 @@ VTI,50,240.00,13250.00,Capital One Investing`
       });
       const allBtn = $('#chipAll');
       const noneBtn = $('#chipNone');
-      if (allBtn) allBtn.onclick = () => { activeSources = new Set(allSourceFiles()); renderAll(); };
-      if (noneBtn) noneBtn.onclick = () => { activeSources = new Set(); renderAll(); };
+      if (allBtn) allBtn.onclick = (e) => {
+        e.preventDefault();
+        activeSources = new Set(allSourceFiles());
+        renderAll();
+      };
+      if (noneBtn) noneBtn.onclick = (e) => {
+        e.preventDefault();
+        activeSources = new Set(); // empty is allowed
+        renderAll();
+      };
     }
 
     function renderAll() {
@@ -1535,6 +1556,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       if (confirm('Clear all loaded holdings?')) {
         holdings = [];
         activeSources = null;
+        knownSources = new Set();
         saveState();
         renderAll();
         toast('Cleared');
