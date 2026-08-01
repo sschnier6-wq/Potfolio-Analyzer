@@ -41,7 +41,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v22</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v23</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -174,6 +174,37 @@
     }
 
     // Human-friendly account labels for charts (avoid raw XXXX4711 / Unknown)
+    // Normalize position into a high-level asset class for Overview mix
+    function classifyAsset(p) {
+      const t = String(p.ticker || '').toUpperCase();
+      const d = String(p.description || '').toUpperCase();
+      const a = String(p.asset_type || '').toUpperCase();
+      const blob = t + ' ' + d + ' ' + a;
+
+      if (/CASH|SPAXX|FDRXX|VMFXX|SWVXX|FCASH|FDIC|MONEY MARKET|SWEEP|CASH AND CASH/i.test(blob))
+        return 'Cash';
+      if (/FIXED INCOME|BOND|TREASURY|MUNICIPAL|MUNI|CORPORATE BOND|AGG|BND|TIP|GOVT/i.test(blob) &&
+          !/EQUITY|STOCK|GROWTH|VALUE FUND/i.test(blob))
+        return 'Bonds';
+      // CUSIP-style fixed income often has digits + letter pattern and was tagged Fixed Income
+      if (a === 'FIXED INCOME' || a === 'BOND') return 'Bonds';
+      if (/ANNUITY|RILA|LEVEL ADVANTAGE|MARKET LINK|LVL ADVNTG|MKT LINK|JCKSN|LINCOLN LVL/i.test(blob) ||
+          t === '53407L275' || t === '46849B384')
+        return 'Annuities';
+      if (/MULTI-?ASSET|ALLOCATION|TARGET|CONSERVATIVE GROWTH|AGGRESSIVE GROWTH ALLOC|CIPAX|MAAGX|BALANCED/i.test(blob) ||
+          a === 'MULTI-ASSET')
+        return 'Multi-Asset';
+      if (/COMMODITY|FTGC|GOLD|GLD|SLV|USO|DBA/i.test(blob))
+        return 'Commodities';
+      if (/REIT|VNQ|REAL ESTATE/i.test(blob))
+        return 'Real Estate';
+      // Default equities (stocks, equity ETFs/funds)
+      if (a === 'EQUITY' || a === 'EQUITIES' || a === '' || a === 'STOCK')
+        return 'Equities';
+      if (a === 'OTHER') return 'Other';
+      return 'Equities';
+    }
+
     function friendlyAccount(account, broker, sourceFile) {
       const a = String(account || '').trim();
       const b = String(broker || '').trim();
@@ -1214,14 +1245,39 @@ VTI,50,240.00,13250.00,Capital One Investing`
     function renderOverview() {
       const cons = consolidated().slice(0, 12);
       const byAcct = {};
+      const byClass = {};
+      let totalVal = 0;
       viewHoldings().forEach(p => {
         const label = friendlyAccount(p.account, p.broker, p.source_file);
-        byAcct[label] = (byAcct[label] || 0) + (p.market_value || 0);
+        const val = p.market_value || 0;
+        byAcct[label] = (byAcct[label] || 0) + val;
+        const cls = classifyAsset(p);
+        byClass[cls] = (byClass[cls] || 0) + val;
+        totalVal += val;
       });
       const acctLabels = Object.keys(byAcct);
       const acctVals = Object.values(byAcct);
+      // Preferred order for asset classes
+      const classOrder = ['Equities', 'Bonds', 'Multi-Asset', 'Annuities', 'Cash', 'Commodities', 'Real Estate', 'Other'];
+      const classLabels = classOrder.filter(c => (byClass[c] || 0) > 0)
+        .concat(Object.keys(byClass).filter(c => !classOrder.includes(c) && byClass[c] > 0));
+      const classVals = classLabels.map(c => byClass[c]);
 
       let html = `
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold mb-2 text-slate-300">Asset Class Mix</h3>
+          <div id="chartClass" style="height:240px"></div>
+          <div class="mt-2 space-y-1">
+            ${classLabels.map(c => {
+              const v = byClass[c] || 0;
+              const pct = totalVal ? (v / totalVal) * 100 : 0;
+              return `<div class="flex justify-between text-xs">
+                <span class="text-slate-300">${c}</span>
+                <span class="text-slate-400">${fmtMoney(v)} <span class="text-sky-400">(${fmt(pct, 1)}%)</span></span>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold mb-2 text-slate-300">Allocation by Account</h3>
           <div id="chartAcct" style="height:220px"></div>
@@ -1257,6 +1313,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
       // Charts (mobile-friendly)
       setTimeout(() => {
+        if (classLabels.length) {
+          Plotly.newPlot('chartClass', [{
+            values: classVals, labels: classLabels, type: 'pie',
+            hole: 0.45, textinfo: 'label+percent',
+            marker: { colors: ['#0ea5e9','#a78bfa','#f59e0b','#f472b6','#34d399','#fb923c','#38bdf8','#94a3b8'] }
+          }], {
+            margin: { t: 10, b: 10, l: 10, r: 10 },
+            paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+            font: { color: '#94a3b8', size: 11 },
+            showlegend: true, legend: { orientation: 'h', y: -0.12 }
+          }, { responsive: true, displayModeBar: false });
+        }
         if (acctLabels.length) {
           Plotly.newPlot('chartAcct', [{
             values: acctVals, labels: acctLabels, type: 'pie',
