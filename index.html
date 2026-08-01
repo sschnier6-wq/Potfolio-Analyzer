@@ -39,7 +39,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v13</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v14</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -408,6 +408,163 @@
       return out;
     }
 
+    // Excel matrix parser (array-of-arrays). Handles Baird Security-ID format reliably.
+    function parseExcelMatrix(matrix, broker, sourceName) {
+      if (!matrix || !matrix.length) return [];
+      // Flatten each row to string cells for detection
+      const asStrings = matrix.map(row =>
+        (row || []).map(c => (c == null ? '' : String(c).trim()))
+      );
+      const hasSecId = asStrings.some(row =>
+        row.some(c => /^Security ID:\s*/i.test(c))
+      );
+
+      if (hasSecId || /baird/i.test(broker || '')) {
+        return parseBairdMatrix(asStrings, matrix, broker || 'RW Baird', sourceName);
+      }
+
+      // Generic: treat first row as headers, convert to objects, reuse parseRows
+      const headerRow = asStrings[0] || [];
+      const headers = headerRow.map((h, i) => h || `__col${i}`);
+      const objs = [];
+      for (let i = 1; i < matrix.length; i++) {
+        const obj = {};
+        const row = matrix[i] || [];
+        headers.forEach((h, j) => { obj[h] = row[j] != null ? row[j] : ''; });
+        objs.push(obj);
+      }
+      return parseRows(objs, headers, broker, sourceName);
+    }
+
+    function parseBairdMatrix(strRows, rawRows, broker, sourceName) {
+      let currentTicker = null;
+      const out = [];
+
+      // Find column indexes from header row if present
+      const header = strRows[0] || [];
+      const idxOf = (names) => {
+        for (const n of names) {
+          const i = header.findIndex(h => norm(h) === norm(n) || norm(h).includes(norm(n)));
+          if (i >= 0) return i;
+        }
+        return -1;
+      };
+      const iAcct = idxOf(['Account Number', 'Account', 'Account #']);
+      const iName = idxOf(['Security Name', 'Description', 'Name']);
+      const iCat  = idxOf(['Asset Category', 'Category', 'Asset Class']);
+      const iQty  = idxOf(['Quantity', 'Qty', 'Shares']);
+      const iPrice = idxOf(['Price', 'Last Price']);
+      // Prefer exact "Value" over "Daily Value Change"
+      let iValue = header.findIndex(h => norm(h) === 'value');
+      if (iValue < 0) iValue = idxOf(['Value', 'Current Value', 'Market Value']);
+
+      for (let ri = 0; ri < strRows.length; ri++) {
+        const cells = strRows[ri];
+        const raw = rawRows[ri] || [];
+        if (!cells || !cells.length) continue;
+
+        // Security ID header row
+        let secId = null;
+        for (const c of cells) {
+          if (/^Security ID:\s*/i.test(c)) {
+            secId = c.replace(/^Security ID:\s*/i, '').trim().toUpperCase();
+            break;
+          }
+        }
+        if (secId) {
+          currentTicker = secId;
+          continue;
+        }
+
+        // Account
+        let account = '';
+        if (iAcct >= 0 && cells[iAcct] && /^XXXX/i.test(cells[iAcct])) {
+          account = cells[iAcct].toUpperCase();
+        } else {
+          for (const c of cells) {
+            if (/^XXXX\d+/i.test(c)) { account = c.toUpperCase(); break; }
+          }
+        }
+        if (!account || /total/i.test(account)) continue;
+
+        // Description
+        let desc = '';
+        if (iName >= 0 && cells[iName]) desc = cells[iName];
+        if (!desc) {
+          for (const c of cells) {
+            if (c.length > 6 && !/^XXXX/i.test(c) && !/^\d+\.?\d*$/.test(c) &&
+                !/^(Equities|Fixed Income|Cash and Cash Equivalents|Multi-Asset|Other)$/i.test(c) &&
+                !/Security ID/i.test(c)) {
+              if (c.length > desc.length) desc = c;
+            }
+          }
+        }
+
+        // Numbers from named columns first
+        let shares = iQty >= 0 ? cleanNum(raw[iQty] != null ? raw[iQty] : cells[iQty]) : null;
+        let price  = iPrice >= 0 ? cleanNum(raw[iPrice] != null ? raw[iPrice] : cells[iPrice]) : null;
+        let mkt    = iValue >= 0 ? cleanNum(raw[iValue] != null ? raw[iValue] : cells[iValue]) : null;
+
+        // Fallback: scan all numeric cells
+        if (mkt == null || shares == null) {
+          const nums = cells.map(c => cleanNum(c)).filter(n => n != null && !isNaN(n));
+          if (nums.length) {
+            const sorted = [...nums].sort((a, b) => Math.abs(b) - Math.abs(a));
+            if (mkt == null) mkt = sorted[0];
+            if (shares == null) {
+              for (const n of nums) {
+                if (n !== mkt && n > 0 && n < 1e8) { shares = n; break; }
+              }
+              if (shares == null && mkt != null) { shares = mkt; price = price || 1; }
+            }
+          }
+        }
+
+        if ((shares == null || shares === 0) && (mkt == null || mkt === 0)) continue;
+        if (/ACCRUED INTEREST/i.test(desc) && (mkt || 0) < 20) continue;
+
+        let ticker = currentTicker || 'UNKNOWN';
+        let cat = iCat >= 0 ? cells[iCat] : '';
+        if (!cat) {
+          for (const c of cells) {
+            if (/^(Equities|Fixed Income|Cash and Cash Equivalents|Multi-Asset|Other)$/i.test(c)) {
+              cat = c; break;
+            }
+          }
+        }
+
+        let asset = 'Equity';
+        if (/Cash and Cash Equivalents|cash|fdic|money market|sweep/i.test(cat + ' ' + desc)) {
+          asset = 'Cash';
+          if (/VANGUARD FEDERAL MONEY MARKET/i.test(desc)) ticker = 'VMFXX';
+          else if (/FDIC INSURED/i.test(desc)) ticker = 'CASH';
+          else if (/ACCRUED/i.test(desc)) ticker = 'ACCRUED';
+          else if (currentTicker && currentTicker !== 'CASH SWEEP') ticker = currentTicker;
+          else ticker = 'CASH';
+        } else if (/Fixed Income/i.test(cat)) asset = 'Fixed Income';
+        else if (/Multi-Asset/i.test(cat)) asset = 'Multi-Asset';
+        else if (/Other/i.test(cat)) asset = 'Other';
+
+        if (ticker === 'CASH SWEEP') ticker = 'CASH';
+        if (mkt == null && price != null && shares != null) mkt = price * shares;
+
+        out.push({
+          broker: broker || 'RW Baird',
+          account,
+          ticker,
+          description: desc,
+          shares: shares,
+          last_price: price,
+          market_value: mkt,
+          cost_basis: null,
+          unrealized_gl: null,
+          asset_type: asset,
+          source_file: sourceName
+        });
+      }
+      return out;
+    }
+
     // RW Baird (and similar custodians) put the identifier in "Security ID: XXX" rows
     function parseBairdStyle(rows, headers, broker, sourceName, cols) {
       let currentTicker = null;
@@ -577,12 +734,19 @@
             try {
               const wb = XLSX.read(e.target.result, { type: 'array' });
               const ws = wb.Sheets[wb.SheetNames[0]];
-              const json = XLSX.utils.sheet_to_json(ws, { defval: '' });
-              const headers = json.length ? Object.keys(json[0]) : [];
-              const parsed = parseRows(json, headers, broker, file.name);
+              // Prefer raw matrix — more reliable for Baird-style Security ID rows
+              const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+              let parsed = parseExcelMatrix(matrix, broker, file.name);
+              if (!parsed.length) {
+                // Fallback: object mode
+                const json = XLSX.utils.sheet_to_json(ws, { defval: '' });
+                const headers = json.length ? Object.keys(json[0]) : [];
+                parsed = parseRows(json, headers, broker, file.name);
+              }
               allNew.push(...parsed);
             } catch (err) {
-              toast('Excel parse error');
+              console.error(err);
+              toast('Excel parse error: ' + (err.message || 'unknown'));
             }
             pending--;
             if (pending === 0) finishLoad(allNew);
