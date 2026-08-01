@@ -47,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v27</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v28</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -147,6 +147,18 @@
     let lastPriceRefresh = null; // { at: Date, updated: n, failed: n, asOf: string }
     let priceCache = {}; // ticker -> { price, asOf, source }
 
+    // Primary residence — Redfin estimate (Aug 2026); editable on Overview
+    let homeAsset = {
+      enabled: true,
+      address: '3903 Harlington Ln, Richardson, TX 75082',
+      value: 620253,
+      source: 'Redfin estimate',
+      beds: 5,
+      baths: 4,
+      sqft: 3211,
+      yearBuilt: 1997
+    };
+
     // Kids' Baird accounts (529s / individual) — not part of Steve's portfolio
     // Last 4 digits from RW Baird: Christian 5882, Julia 0786, Jacob 6963, Annalise 4623
     const EXCLUDED_ACCOUNT_SUFFIXES = ['5882', '0786', '6963', '4623'];
@@ -163,6 +175,32 @@
       if (!activeSources) return list;
       if (activeSources.size === 0) return [];
       return list.filter(p => activeSources.has(p.source_file || 'Unknown'));
+    }
+
+    // Synthetic real-estate position for net-worth / asset-class views
+    function homePosition() {
+      if (!homeAsset || !homeAsset.enabled || !(homeAsset.value > 0)) return null;
+      return {
+        broker: 'Home',
+        account: 'Primary residence',
+        ticker: 'HOME',
+        description: homeAsset.address || 'Primary residence',
+        shares: 1,
+        last_price: homeAsset.value,
+        market_value: homeAsset.value,
+        cost_basis: null,
+        unrealized_gl: null,
+        asset_type: 'Real Estate',
+        source_file: 'Home (manual/estimate)',
+        is_home: true
+      };
+    }
+
+    // Investments + home (for Overview mix / total net-worth style metrics)
+    function viewHoldingsWithHome() {
+      const list = viewHoldings();
+      const h = homePosition();
+      return h ? list.concat([h]) : list;
     }
 
     function allSourceFiles() {
@@ -1282,16 +1320,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
       renderSourceFilter();
 
       const data = viewHoldings();
+      const withHome = viewHoldingsWithHome();
       const totalVal = data.reduce((s, p) => s + (p.market_value || 0), 0);
+      const totalWithHome = withHome.reduce((s, p) => s + (p.market_value || 0), 0);
       const totalCost = data.reduce((s, p) => s + (p.cost_basis || 0), 0);
       const totalGL = data.reduce((s, p) => s + (p.unrealized_gl || 0), 0);
       const nTickers = new Set(data.map(p => p.ticker)).size;
       const nAccts = new Set(data.map(p => p.account)).size;
 
       $('#metrics').innerHTML = `
-        <div class="metric"><div class="label">Market Value</div><div class="value text-sky-300">${fmtMoney(totalVal)}</div></div>
-        <div class="metric"><div class="label">Cost Basis</div><div class="value">${fmtMoney(totalCost)}</div></div>
-        <div class="metric"><div class="label">Unrealized G/L</div><div class="value ${totalGL >= 0 ? 'gain' : 'loss'}">${fmtMoney(totalGL)}</div></div>
+        <div class="metric"><div class="label">Investments</div><div class="value text-sky-300">${fmtMoney(totalVal)}</div></div>
+        <div class="metric"><div class="label">+ Home (est.)</div><div class="value text-emerald-300">${fmtMoney(homeAsset.enabled ? homeAsset.value : 0)}</div></div>
+        <div class="metric"><div class="label">Net-ish total</div><div class="value text-sky-200">${fmtMoney(totalWithHome)}</div></div>
         <div class="metric"><div class="label">Tickers / Accts</div><div class="value">${nTickers} / ${nAccts}</div></div>
       `;
 
@@ -1395,20 +1435,51 @@ VTI,50,240.00,13250.00,Capital One Investing`
       throw lastErr || new Error('fetch failed');
     }
 
+    async function fetchHomeEstimate() {
+      // Redfin public listing page for this address (estimate embedded in HTML/JSON)
+      const redfinUrl = 'https://www.redfin.com/TX/Richardson/3903-Harlington-Ln-75082/home/32240568';
+      const urls = [
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(redfinUrl)}`,
+        `https://corsproxy.io/?${encodeURIComponent(redfinUrl)}`,
+      ];
+      for (const url of urls) {
+        try {
+          const res = await fetch(url, { cache: 'no-store' });
+          if (!res.ok) continue;
+          const html = await res.text();
+          if (!html || html.length < 500) continue;
+          // Common patterns in Redfin pages
+          let m =
+            html.match(/"predictedValue"\s*:\s*(\d+(?:\.\d+)?)/i) ||
+            html.match(/"avmValue"\s*:\s*(\d+(?:\.\d+)?)/i) ||
+            html.match(/"amount"\s*:\s*(\d{5,7})\s*,\s*"currencyCode"\s*:\s*"USD"/i) ||
+            html.match(/Redfin Estimate[^$]{0,40}\$([0-9]{3},[0-9]{3})/i) ||
+            html.match(/\$([0-9]{3},[0-9]{3})\s*(?:Redfin Estimate|estimate)/i) ||
+            html.match(/estimate[^$]{0,30}\$([0-9]{3},[0-9]{3})/i);
+          if (m) {
+            const raw = String(m[1]).replace(/,/g, '');
+            const val = parseFloat(raw);
+            if (val >= 100000 && val <= 5000000) {
+              return { value: Math.round(val), source: 'Redfin estimate (live)', asOf: new Date().toLocaleDateString() };
+            }
+          }
+        } catch (e) {
+          console.warn('Home estimate fetch fail', e);
+        }
+      }
+      return null;
+    }
+
     async function refreshMarketPrices() {
       const data = viewHoldings();
-      if (!data.length) {
-        toast('Load positions first');
-        return;
-      }
       const tickers = [...new Set(
         data.map(p => String(p.ticker || '').toUpperCase().trim()).filter(isPricableTicker)
       )];
-      if (!tickers.length) {
-        toast('No pricable tickers found');
+      if (!tickers.length && !(homeAsset && homeAsset.enabled)) {
+        toast('Load positions or enable home first');
         return;
       }
-      toast(`Refreshing ${tickers.length} prices…`);
+      toast(`Refreshing${tickers.length ? ' ' + tickers.length + ' prices' : ''}${homeAsset.enabled ? ' + home' : ''}…`);
       const btn = document.getElementById('btnRefreshPrices');
       if (btn) {
         btn.disabled = true;
@@ -1417,7 +1488,6 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
       let updated = 0, failed = 0;
       const asOfDates = new Set();
-      // Batch with limited concurrency
       const queue = [...tickers];
       const workers = 4;
       async function worker() {
@@ -1426,7 +1496,6 @@ VTI,50,240.00,13250.00,Capital One Investing`
           try {
             const r = await fetchPrevClose(t);
             if (r.asOf) asOfDates.add(r.asOf);
-            // Apply to all holdings with this ticker (including excluded kids? only view — apply to all holdings for consistency)
             holdings.forEach(p => {
               if (String(p.ticker || '').toUpperCase() !== t) return;
               if (p.statement_value == null && p.market_value != null) {
@@ -1448,7 +1517,30 @@ VTI,50,240.00,13250.00,Capital One Investing`
           }
         }
       }
-      await Promise.all(Array.from({ length: workers }, () => worker()));
+      const stockJob = tickers.length
+        ? Promise.all(Array.from({ length: Math.min(workers, tickers.length) }, () => worker()))
+        : Promise.resolve();
+
+      let homeMsg = '';
+      const homeJob = (async () => {
+        if (!homeAsset.enabled) return;
+        try {
+          const est = await fetchHomeEstimate();
+          if (est && est.value) {
+            homeAsset.value = est.value;
+            homeAsset.source = est.source;
+            homeAsset.refreshedAt = est.asOf;
+            try { localStorage.setItem('portfolio_home_v1', JSON.stringify(homeAsset)); } catch (_) {}
+            homeMsg = ` · home ${fmtMoney(est.value)}`;
+          } else {
+            homeMsg = ' · home estimate unavailable (kept prior)';
+          }
+        } catch (e) {
+          homeMsg = ' · home refresh failed';
+        }
+      })();
+
+      await Promise.all([stockJob, homeJob]);
 
       lastPriceRefresh = {
         at: new Date(),
@@ -1458,7 +1550,11 @@ VTI,50,240.00,13250.00,Capital One Investing`
       };
       try { saveState(); } catch (_) {}
       renderAll();
-      toast(`Updated ${updated} ticker(s)` + (failed ? `, ${failed} failed` : '') + ` · ${lastPriceRefresh.asOf}`);
+      toast(
+        (updated ? `Updated ${updated} ticker(s)` : 'No stock updates') +
+        (failed ? `, ${failed} failed` : '') +
+        homeMsg
+      );
       if (btn) {
         btn.disabled = false;
         btn.textContent = '↻ Refresh prices';
@@ -1470,11 +1566,12 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const byAcct = {};
       const byClass = {};
       let totalVal = 0;
-      viewHoldings().forEach(p => {
-        const label = friendlyAccount(p.account, p.broker, p.source_file);
+      // Asset class + account mix include home for net-worth view
+      viewHoldingsWithHome().forEach(p => {
+        const label = p.is_home ? 'Primary residence' : friendlyAccount(p.account, p.broker, p.source_file);
         const val = p.market_value || 0;
         byAcct[label] = (byAcct[label] || 0) + val;
-        const cls = classifyAsset(p);
+        const cls = p.is_home ? 'Real Estate' : classifyAsset(p);
         byClass[cls] = (byClass[cls] || 0) + val;
         totalVal += val;
       });
@@ -1500,8 +1597,31 @@ VTI,50,240.00,13250.00,Capital One Investing`
             + (lastPriceRefresh.failed ? ` · ${lastPriceRefresh.failed} failed` : '')
         : 'Uses statement values until you refresh. Prices = prior trading-day close (Yahoo).';
 
+      const homeCard = `
+        <div class="card p-3 mb-3 border border-emerald-800/40">
+          <div class="flex items-start justify-between gap-2 mb-1">
+            <div>
+              <h3 class="text-sm font-semibold text-emerald-300">Primary residence</h3>
+              <p class="text-[11px] text-slate-400 mt-0.5">${homeAsset.address}</p>
+              <p class="text-[11px] text-slate-500">${homeAsset.beds} bd · ${homeAsset.baths} ba · ${homeAsset.sqft.toLocaleString()} sq ft · built ${homeAsset.yearBuilt}</p>
+            </div>
+            <label class="flex items-center gap-1.5 text-[11px] text-slate-400 shrink-0">
+              <input type="checkbox" id="homeEnabled" ${homeAsset.enabled ? 'checked' : ''} class="rounded" />
+              Include
+            </label>
+          </div>
+          <div class="flex items-center gap-2 mt-2">
+            <span class="text-xs text-slate-400">Estimate $</span>
+            <input type="number" id="homeValueInput" value="${Math.round(homeAsset.value)}"
+              class="bg-slate-800 border border-slate-600 rounded-lg px-2 py-1 text-sm text-emerald-200 w-32" />
+            <button type="button" id="btnSaveHome" class="text-xs bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg px-2.5 py-1">Save</button>
+          </div>
+          <p class="text-[10px] text-slate-500 mt-1.5">Source: ${homeAsset.source} · not a formal appraisal · edit anytime</p>
+        </div>`;
+
       let html = `
         ${excludedNote}
+        ${homeCard}
         <div class="card p-3 mb-3 border border-sky-800/50">
           <div class="flex items-center justify-between gap-2 mb-1">
             <h3 class="text-sm font-semibold text-slate-300">Live-ish valuation</h3>
@@ -1562,6 +1682,24 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
       const btnRef = document.getElementById('btnRefreshPrices');
       if (btnRef) btnRef.onclick = () => { refreshMarketPrices(); };
+
+      const homeEn = document.getElementById('homeEnabled');
+      if (homeEn) homeEn.onchange = () => {
+        homeAsset.enabled = !!homeEn.checked;
+        try { localStorage.setItem('portfolio_home_v1', JSON.stringify(homeAsset)); } catch (_) {}
+        renderAll();
+      };
+      const btnHome = document.getElementById('btnSaveHome');
+      if (btnHome) btnHome.onclick = () => {
+        const inp = document.getElementById('homeValueInput');
+        const v = parseFloat(inp && inp.value);
+        if (!isNaN(v) && v >= 0) {
+          homeAsset.value = v;
+          try { localStorage.setItem('portfolio_home_v1', JSON.stringify(homeAsset)); } catch (_) {}
+          toast('Home value saved: ' + fmtMoney(v));
+          renderAll();
+        }
+      };
 
       // Charts (mobile-friendly)
       setTimeout(() => {
@@ -1988,9 +2126,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
         const raw = localStorage.getItem('portfolio_holdings_v1');
         if (raw) {
           holdings = JSON.parse(raw);
-          if (holdings.length) renderAll();
         }
       } catch (e) {}
+      try {
+        const h = localStorage.getItem('portfolio_home_v1');
+        if (h) {
+          const parsed = JSON.parse(h);
+          if (parsed && typeof parsed.value === 'number') {
+            homeAsset = Object.assign(homeAsset, parsed);
+          }
+        }
+      } catch (e) {}
+      if (holdings.length || (homeAsset && homeAsset.enabled)) renderAll();
     }
 
     // ========== Events ==========
