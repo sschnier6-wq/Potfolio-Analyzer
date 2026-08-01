@@ -41,7 +41,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v23</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v24</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -139,11 +139,22 @@
     let knownSources = new Set(); // all source names we've ever seen this session
     let currentTab = 'overview';
 
-    // Positions visible under the current file filter
+    // Kids' Baird accounts (529s / individual) — not part of Steve's portfolio
+    // Last 4 digits from RW Baird: Christian 5882, Julia 0786, Jacob 6963, Annalise 4623
+    const EXCLUDED_ACCOUNT_SUFFIXES = ['5882', '0786', '6963', '4623'];
+
+    function isExcludedAccount(account) {
+      const a = String(account || '').toUpperCase().replace(/\s/g, '');
+      if (!a) return false;
+      return EXCLUDED_ACCOUNT_SUFFIXES.some(suf => a.endsWith(suf));
+    }
+
+    // Positions visible under the current file filter (and not kids' accounts)
     function viewHoldings() {
-      if (!activeSources) return holdings; // not initialized yet → show all
-      if (activeSources.size === 0) return []; // user turned everything off
-      return holdings.filter(p => activeSources.has(p.source_file || 'Unknown'));
+      let list = holdings.filter(p => !isExcludedAccount(p.account));
+      if (!activeSources) return list;
+      if (activeSources.size === 0) return [];
+      return list.filter(p => activeSources.has(p.source_file || 'Unknown'));
     }
 
     function allSourceFiles() {
@@ -1263,7 +1274,17 @@ VTI,50,240.00,13250.00,Capital One Investing`
         .concat(Object.keys(byClass).filter(c => !classOrder.includes(c) && byClass[c] > 0));
       const classVals = classLabels.map(c => byClass[c]);
 
+      const excludedRows = holdings.filter(p => isExcludedAccount(p.account));
+      const excludedVal = excludedRows.reduce((s, p) => s + (p.market_value || 0), 0);
+      const excludedNote = excludedRows.length
+        ? `<div class="card p-2.5 mb-3 border border-amber-800/40 bg-amber-950/30 text-xs text-amber-200/90">
+             Excluded ${excludedRows.length} position(s) in kids’ accounts (…5882 Christian, …0786 Julia, …6963 Jacob, …4623 Annalise)
+             totaling ${fmtMoney(excludedVal)} — not part of your portfolio totals.
+           </div>`
+        : '';
+
       let html = `
+        ${excludedNote}
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold mb-2 text-slate-300">Asset Class Mix</h3>
           <div id="chartClass" style="height:240px"></div>
