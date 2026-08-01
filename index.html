@@ -40,7 +40,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v15</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v16</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -339,18 +339,18 @@
       const catCol = findCol(headers, ['assetcategory', 'asset category', 'category', 'assetclass']);
 
       // ---------- Special handler: RW Baird (and similar) "Security ID: TICKER" format ----------
-      // Baird exports put the ticker/CUSIP in a header row "Security ID: AAPL"
-      // and the actual holdings (account, name, qty, value) on the following rows.
+      // Only when the file actually contains "Security ID:" rows.
+      // Normalized CSVs with a Symbol column must use the standard parser even if
+      // the filename contains "Baird".
       const hasSecurityIdRows = rows.some(r =>
         Object.values(r || {}).some(v => /^Security ID:\s*/i.test(String(v || '').trim()))
       );
 
-      if (hasSecurityIdRows || (broker && /baird/i.test(broker))) {
+      if (hasSecurityIdRows) {
         const bairdResult = parseBairdStyle(rows, headers, broker || 'RW Baird', sourceName, {
           qtyCol, valueCol, priceCol, acctCol, descCol, catCol
         });
         if (bairdResult.length > 0) return bairdResult;
-        // If Baird parser returned nothing, fall through and try normal path
       }
 
       if (!tickerCol) {
@@ -420,7 +420,8 @@
         row.some(c => /^Security ID:\s*/i.test(c))
       );
 
-      if (hasSecId || /baird/i.test(broker || '')) {
+      // Only use Security-ID parser when those rows exist (not merely because name says Baird)
+      if (hasSecId) {
         return parseBairdMatrix(asStrings, matrix, broker || 'RW Baird', sourceName);
       }
 
