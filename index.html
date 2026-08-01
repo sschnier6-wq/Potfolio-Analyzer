@@ -47,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v32</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v33</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1732,7 +1732,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const refreshInfo = lastPriceRefresh
         ? `Last refresh ${lastPriceRefresh.at.toLocaleString()} · ${lastPriceRefresh.updated} priced · as-of ${lastPriceRefresh.asOf}`
             + (lastPriceRefresh.failed ? ` · ${lastPriceRefresh.failed} failed` : '')
-        : 'Uses statement values until you refresh. Prices = prior trading-day close (Yahoo).';
+        : 'Uses statement values until you refresh. Stocks/ETFs = prior close; annuities ≈ SPY-scaled; home = Redfin when available.';
 
       const homeCard = `
         <div class="card p-3 mb-3 border border-emerald-800/40">
@@ -1768,7 +1768,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
             </button>
           </div>
           <p class="text-[11px] text-slate-400 leading-snug">${refreshInfo}</p>
-          <p class="text-[11px] text-slate-500 mt-1">Shares from your statements × prior close. Cash @ $1. CUSIPs / annuities keep statement value.</p>
+          <p class="text-[11px] text-slate-500 mt-1">Stocks/ETFs/funds: shares × prior close (Yahoo). Cash @ $1. Annuities (Lincoln/Jackson): statement value scaled by SPY vs baseline (approx; not insurer interim value). Other CUSIPs unchanged. Home: Redfin when available.</p>
         </div>
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold mb-2 text-slate-300">Asset Class Mix</h3>
