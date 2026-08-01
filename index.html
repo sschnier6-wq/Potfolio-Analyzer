@@ -47,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v31</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v32</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1470,16 +1470,134 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return null;
     }
 
+    function isAnnuityPosition(p) {
+      const t = String(p.ticker || '').toUpperCase();
+      const d = String(p.description || '').toUpperCase();
+      if (t === '53407L275' || t === '46849B384') return true;
+      return /LINCOLN|LVL ADVNTG|LEVEL ADVANTAGE|JCKSN|JACKSON|MARKET LINK|MKT LINK|RILA/i.test(d + ' ' + t);
+    }
+
+    // Scale RILA/annuity statement values by SPY (S&P 500 proxy) vs price at statement baseline
+    async function scaleAnnuitiesFromSpy() {
+      const annuities = holdings.filter(isAnnuityPosition);
+      if (!annuities.length) return { count: 0, msg: '' };
+
+      // Ensure statement baseline values are frozen once
+      annuities.forEach(p => {
+        if (p.statement_value == null && p.market_value != null) p.statement_value = p.market_value;
+      });
+
+      // Fetch SPY daily history (proxy for S&P 500)
+      const yahoo = 'https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=3mo';
+      const urls = [
+        yahoo,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(yahoo)}`,
+        `https://corsproxy.io/?${encodeURIComponent(yahoo)}`,
+      ];
+      let closes = [], timestamps = [];
+      for (const url of urls) {
+        try {
+          const res = await fetch(url, { cache: 'no-store' });
+          if (!res.ok) continue;
+          const data = await res.json();
+          const result = data?.chart?.result?.[0];
+          if (!result) continue;
+          timestamps = result.timestamp || [];
+          closes = (result.indicators?.quote?.[0]?.close || []).map((c, i) => ({ c, t: timestamps[i] }))
+            .filter(x => x.c != null && !isNaN(x.c));
+          if (closes.length >= 2) break;
+        } catch (e) { /* try next */ }
+      }
+      if (closes.length < 2) return { count: 0, msg: ' · annuity SPY scale failed' };
+
+      const spyNow = closes[closes.length - 1].c;
+      const spyNowDate = closes[closes.length - 1].t
+        ? new Date(closes[closes.length - 1].t * 1000).toLocaleDateString()
+        : '';
+
+      // Baseline SPY: prefer close on/near statement date if we recorded one; else first refresh freezes baseline
+      let spyBase = null;
+      let baseSource = '';
+      try {
+        const saved = JSON.parse(localStorage.getItem('portfolio_annuity_spy_v1') || 'null');
+        if (saved && saved.spyBase > 0) {
+          spyBase = saved.spyBase;
+          baseSource = saved.asOf || 'saved baseline';
+        }
+      } catch (_) {}
+
+      if (!spyBase) {
+        // Heuristic: Baird export names often include MMDDYY (e.g. 072926). Use SPY close on/before that day.
+        let targetMs = null;
+        holdings.forEach(p => {
+          const m = String(p.source_file || '').match(/(\d{2})(\d{2})(\d{2})/);
+          if (m) {
+            const yy = 2000 + parseInt(m[3], 10);
+            const mo = parseInt(m[1], 10) - 1;
+            const dd = parseInt(m[2], 10);
+            const d = new Date(yy, mo, dd);
+            if (!isNaN(d.getTime())) targetMs = d.getTime();
+          }
+        });
+        if (targetMs) {
+          // Find last close on or before statement date
+          let best = null;
+          for (const row of closes) {
+            const ms = row.t * 1000;
+            if (ms <= targetMs + 24 * 3600 * 1000) best = row;
+          }
+          if (best) {
+            spyBase = best.c;
+            baseSource = new Date(best.t * 1000).toLocaleDateString();
+          }
+        }
+      }
+      if (!spyBase) {
+        // Fall back: use prior bar as baseline so first refresh is a small move, not zero
+        spyBase = closes[closes.length - 2].c;
+        baseSource = closes[closes.length - 2].t
+          ? new Date(closes[closes.length - 2].t * 1000).toLocaleDateString()
+          : 'prior day';
+      }
+
+      try {
+        localStorage.setItem('portfolio_annuity_spy_v1', JSON.stringify({
+          spyBase, asOf: baseSource, spyNow, savedAt: new Date().toISOString()
+        }));
+      } catch (_) {}
+
+      const factor = spyNow / spyBase;
+      let n = 0;
+      annuities.forEach(p => {
+        const baseVal = p.statement_value != null ? p.statement_value : p.market_value;
+        if (baseVal == null || isNaN(baseVal)) return;
+        const newVal = baseVal * factor;
+        p.market_value = newVal;
+        p.last_price = p.shares ? newVal / p.shares : newVal;
+        p.price_as_of = spyNowDate;
+        p.price_source = `SPY scale ${factor.toFixed(4)}× (base ${baseSource})`;
+        if (p.cost_basis != null) p.unrealized_gl = newVal - p.cost_basis;
+        n++;
+      });
+
+      const pct = ((factor - 1) * 100).toFixed(2);
+      return {
+        count: n,
+        msg: n ? ` · ${n} annuit(y/ies) ${pct >= 0 ? '+' : ''}${pct}% vs SPY` : ''
+      };
+    }
+
     async function refreshMarketPrices() {
       const data = viewHoldings();
       const tickers = [...new Set(
         data.map(p => String(p.ticker || '').toUpperCase().trim()).filter(isPricableTicker)
       )];
-      if (!tickers.length && !(homeAsset && homeAsset.enabled)) {
+      const hasAnnuities = holdings.some(isAnnuityPosition);
+      if (!tickers.length && !(homeAsset && homeAsset.enabled) && !hasAnnuities) {
         toast('Load positions or enable home first');
         return;
       }
-      toast(`Refreshing${tickers.length ? ' ' + tickers.length + ' prices' : ''}${homeAsset.enabled ? ' + home' : ''}…`);
+      toast(`Refreshing${tickers.length ? ' ' + tickers.length + ' prices' : ''}${hasAnnuities ? ' + annuities' : ''}${homeAsset.enabled ? ' + home' : ''}…`);
       const btn = document.getElementById('btnRefreshPrices');
       if (btn) {
         btn.disabled = true;
@@ -1540,7 +1658,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
         }
       })();
 
-      await Promise.all([stockJob, homeJob]);
+      let annuityMsg = '';
+      const annuityJob = (async () => {
+        try {
+          const r = await scaleAnnuitiesFromSpy();
+          annuityMsg = r.msg || '';
+          if (r.count) updated += r.count;
+        } catch (e) {
+          annuityMsg = ' · annuity scale failed';
+        }
+      })();
+
+      await Promise.all([stockJob, homeJob, annuityJob]);
 
       lastPriceRefresh = {
         at: new Date(),
@@ -1551,8 +1680,9 @@ VTI,50,240.00,13250.00,Capital One Investing`
       try { saveState(); } catch (_) {}
       renderAll();
       toast(
-        (updated ? `Updated ${updated} ticker(s)` : 'No stock updates') +
+        (updated ? `Updated ${updated} item(s)` : 'No stock updates') +
         (failed ? `, ${failed} failed` : '') +
+        annuityMsg +
         homeMsg
       );
       if (btn) {
