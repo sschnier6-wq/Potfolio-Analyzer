@@ -9,8 +9,14 @@
   <title>Portfolio Analyzer</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
-          onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'"></script>
+  <!-- Local SheetJS first (same origin as GitHub Pages — avoids iPhone CDN blocks) -->
+  <script src="xlsx.min.js"></script>
+  <script>
+    // Fallback CDNs if local copy missing
+    if (typeof XLSX === 'undefined') {
+      document.write('<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"><\/script>');
+    }
+  </script>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <style>
     :root { color-scheme: dark; }
@@ -41,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v25</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v26</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -907,9 +913,11 @@
         const name = (file.name || 'upload').toLowerCase();
         const broker = detectBroker(name) || 'Generic';
 
-        if (isSpreadsheet(file) || /\.xlsx?$/i.test(file.name || '') || /baird/i.test(file.name || '')) {
+        const tryExcel = isSpreadsheet(file) || /\.xlsx?$/i.test(file.name || '') || /baird/i.test(file.name || '')
+          || /excel|sheet|spreadsheet/i.test(file.type || '') || (!isCsvLike(file) && file.size > 1000);
+        if (tryExcel) {
           if (typeof XLSX === 'undefined') {
-            toast('Excel library missing — reload page on Wi‑Fi');
+            toast('Excel library missing (xlsx.min.js). Re-upload index.html AND xlsx.min.js to GitHub.');
             pending--;
             if (pending === 0) finishLoad(allNew);
             return;
