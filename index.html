@@ -39,9 +39,12 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v12</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v13</p>
       </div>
-      <button id="btnClear" class="text-xs text-slate-400 border border-slate-600 rounded-lg px-2.5 py-1.5 hidden">Clear</button>
+      <div class="flex items-center gap-2">
+        <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
+        <button id="btnClear" class="text-xs text-slate-400 border border-slate-600 rounded-lg px-2.5 py-1.5 hidden">Clear</button>
+      </div>
     </div>
   </header>
 
@@ -610,13 +613,14 @@
         return;
       }
       // Merge, prefer newer for same key
-      const key = (p) => `${p.broker}|${p.account}|${p.ticker}|${p.shares}`;
+      const key = (p) => `${p.broker}|${p.account}|${p.ticker}|${p.shares}|${p.source_file}`;
       const map = new Map(holdings.map(p => [key(p), p]));
       newRows.forEach(p => map.set(key(p), p));
       holdings = Array.from(map.values());
       saveState();
       renderAll();
-      toast(`Loaded ${newRows.length} positions`);
+      const nFiles = allSourceFiles().length;
+      toast(`+${newRows.length} positions · ${holdings.length} total · ${nFiles} file${nFiles>1?'s':''}`);
     }
 
     // ========== Samples (embedded so app works offline after first load) ==========
@@ -783,6 +787,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
         $('#dashboard').classList.add('hidden');
         $('#btnClear').classList.add('hidden');
         $('#btnExport').classList.add('hidden');
+        const addH = $('#btnAddFilesHeader');
+        if (addH) addH.classList.add('hidden');
         activeSources = null;
         return;
       }
@@ -790,6 +796,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
       $('#dashboard').classList.remove('hidden');
       $('#btnClear').classList.remove('hidden');
       $('#btnExport').classList.remove('hidden');
+      const addH = $('#btnAddFilesHeader');
+      if (addH) addH.classList.remove('hidden');
 
       renderSourceFilter();
 
@@ -1266,9 +1274,9 @@ VTI,50,240.00,13250.00,Capital One Investing`
       e.target.value = ''; // allow re-selecting the same file later
     });
 
-    // Add-files button (shown on dashboard) reuses the same file input
+    // Add-files buttons reuse the same file input
     document.addEventListener('click', (e) => {
-      if (e.target && e.target.id === 'btnAddFiles') {
+      if (e.target && (e.target.id === 'btnAddFiles' || e.target.id === 'btnAddFilesHeader')) {
         $('#fileInput').click();
       }
     });
