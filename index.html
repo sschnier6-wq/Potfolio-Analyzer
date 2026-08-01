@@ -39,7 +39,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v11</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v12</p>
       </div>
       <button id="btnClear" class="text-xs text-slate-400 border border-slate-600 rounded-lg px-2.5 py-1.5 hidden">Clear</button>
     </div>
@@ -82,6 +82,14 @@
 
     <!-- Dashboard (hidden until data loaded) -->
     <section id="dashboard" class="hidden">
+      <!-- Source file filter -->
+      <div id="sourceFilter" class="mb-3 hidden">
+        <div class="flex items-center justify-between mb-1.5">
+          <span class="text-xs text-slate-400">Show files</span>
+          <button id="btnAddFiles" class="text-xs text-sky-400 font-semibold">+ Add files</button>
+        </div>
+        <div id="sourceChips" class="flex flex-wrap gap-1.5"></div>
+      </div>
       <!-- Metrics -->
       <div class="grid grid-cols-2 gap-2 mb-3" id="metrics"></div>
 
@@ -121,8 +129,29 @@
 
   <script>
     // ========== State ==========
-    let holdings = [];   // array of position objects
+    let holdings = [];   // array of position objects (all loaded files)
+    let activeSources = null; // null = all sources; Set of source_file names when filtering
     let currentTab = 'overview';
+
+    // Positions visible under the current file filter
+    function viewHoldings() {
+      if (!activeSources || activeSources.size === 0) return holdings;
+      return holdings.filter(p => activeSources.has(p.source_file || 'Unknown'));
+    }
+
+    function allSourceFiles() {
+      const set = new Set();
+      holdings.forEach(p => set.add(p.source_file || 'Unknown'));
+      return [...set].sort();
+    }
+
+    function shortName(name) {
+      if (!name) return 'Unknown';
+      // Strip path-like noise; keep readable stem
+      let n = String(name).replace(/^.*[\\/]/, '');
+      if (n.length > 28) n = n.slice(0, 12) + '…' + n.slice(-12);
+      return n;
+    }
 
     // ========== Helpers ==========
     const $ = (sel) => document.querySelector(sel);
@@ -627,14 +656,14 @@ VTI,50,240.00,13250.00,Capital One Investing`
     // ========== Analysis ==========
     function consolidated() {
       const map = {};
-      holdings.forEach(p => {
+      viewHoldings().forEach(p => {
         if (!map[p.ticker]) {
           map[p.ticker] = {
             ticker: p.ticker, description: p.description,
             asset_type: p.asset_type || 'Equity',
             fundKey: resolveFundKey(p.ticker, p.description),
             total_shares: 0, total_value: 0, total_cost: 0, total_gl: 0,
-            accounts: new Set(), brokers: new Set()
+            accounts: new Set(), brokers: new Set(), sources: new Set()
           };
         }
         const c = map[p.ticker];
@@ -644,9 +673,9 @@ VTI,50,240.00,13250.00,Capital One Investing`
         c.total_gl += p.unrealized_gl || 0;
         c.accounts.add(p.account);
         c.brokers.add(p.broker);
+        c.sources.add(p.source_file || 'Unknown');
         if (p.asset_type) c.asset_type = p.asset_type;
         if (!c.fundKey) c.fundKey = resolveFundKey(p.ticker, p.description);
-        // Prefer a longer/better description when available
         if ((p.description || '').length > (c.description || '').length) c.description = p.description;
       });
       const total = Object.values(map).reduce((s, x) => s + x.total_value, 0) || 1;
@@ -664,15 +693,16 @@ VTI,50,240.00,13250.00,Capital One Investing`
     }
 
     function sharedTickers() {
+      const data = viewHoldings();
       const byTicker = {};
-      holdings.forEach(p => {
+      data.forEach(p => {
         if (!byTicker[p.ticker]) byTicker[p.ticker] = new Set();
         byTicker[p.ticker].add(p.account);
       });
       return Object.entries(byTicker)
         .filter(([, accts]) => accts.size > 1)
         .map(([ticker, accts]) => {
-          const rows = holdings.filter(p => p.ticker === ticker);
+          const rows = data.filter(p => p.ticker === ticker);
           return {
             ticker,
             n_accounts: accts.size,
@@ -687,7 +717,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
     function tlhCandidates() {
       const rate = (parseFloat($('#taxRate').value) || 37) / 100;
       const minL = parseFloat($('#minLoss').value) || 100;
-      return holdings
+      return viewHoldings()
         .filter(p => p.unrealized_gl != null && p.unrealized_gl < -Math.abs(minL))
         .map(p => ({
           ...p,
@@ -698,12 +728,62 @@ VTI,50,240.00,13250.00,Capital One Investing`
     }
 
     // ========== Render ==========
+    function renderSourceFilter() {
+      const sources = allSourceFiles();
+      const bar = $('#sourceFilter');
+      const chips = $('#sourceChips');
+      if (!sources.length) {
+        bar.classList.add('hidden');
+        return;
+      }
+      bar.classList.remove('hidden');
+      if (!activeSources) {
+        activeSources = new Set(sources);
+      } else {
+        // Keep previous selections that still exist; auto-enable newly added files
+        const prev = activeSources;
+        activeSources = new Set();
+        sources.forEach(s => {
+          if (prev.has(s) || !prev.size) activeSources.add(s);
+        });
+        // New files (not in prev) → enable
+        sources.forEach(s => { if (!prev.has(s)) activeSources.add(s); });
+        if (activeSources.size === 0) sources.forEach(s => activeSources.add(s));
+      }
+
+      chips.innerHTML = sources.map(s => {
+        const on = activeSources.has(s);
+        const count = holdings.filter(p => (p.source_file || 'Unknown') === s).length;
+        return `<button type="button" data-source="${s.replace(/"/g, '&quot;')}"
+          class="source-chip text-[11px] px-2.5 py-1 rounded-full border transition
+            ${on ? 'bg-sky-600/30 border-sky-500 text-sky-200' : 'bg-slate-800 border-slate-600 text-slate-500'}">
+          ${shortName(s)} <span class="opacity-70">(${count})</span>
+        </button>`;
+      }).join('') +
+      `<button type="button" id="chipAll" class="text-[11px] px-2.5 py-1 rounded-full border border-slate-600 text-slate-400">All</button>
+       <button type="button" id="chipNone" class="text-[11px] px-2.5 py-1 rounded-full border border-slate-600 text-slate-400">None</button>`;
+
+      chips.querySelectorAll('.source-chip').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const s = btn.getAttribute('data-source');
+          if (activeSources.has(s)) activeSources.delete(s);
+          else activeSources.add(s);
+          renderAll();
+        });
+      });
+      const allBtn = $('#chipAll');
+      const noneBtn = $('#chipNone');
+      if (allBtn) allBtn.onclick = () => { activeSources = new Set(allSourceFiles()); renderAll(); };
+      if (noneBtn) noneBtn.onclick = () => { activeSources = new Set(); renderAll(); };
+    }
+
     function renderAll() {
       if (!holdings.length) {
         $('#uploadSection').classList.remove('hidden');
         $('#dashboard').classList.add('hidden');
         $('#btnClear').classList.add('hidden');
         $('#btnExport').classList.add('hidden');
+        activeSources = null;
         return;
       }
       $('#uploadSection').classList.add('hidden');
@@ -711,11 +791,14 @@ VTI,50,240.00,13250.00,Capital One Investing`
       $('#btnClear').classList.remove('hidden');
       $('#btnExport').classList.remove('hidden');
 
-      const totalVal = holdings.reduce((s, p) => s + (p.market_value || 0), 0);
-      const totalCost = holdings.reduce((s, p) => s + (p.cost_basis || 0), 0);
-      const totalGL = holdings.reduce((s, p) => s + (p.unrealized_gl || 0), 0);
-      const nTickers = new Set(holdings.map(p => p.ticker)).size;
-      const nAccts = new Set(holdings.map(p => p.account)).size;
+      renderSourceFilter();
+
+      const data = viewHoldings();
+      const totalVal = data.reduce((s, p) => s + (p.market_value || 0), 0);
+      const totalCost = data.reduce((s, p) => s + (p.cost_basis || 0), 0);
+      const totalGL = data.reduce((s, p) => s + (p.unrealized_gl || 0), 0);
+      const nTickers = new Set(data.map(p => p.ticker)).size;
+      const nAccts = new Set(data.map(p => p.account)).size;
 
       $('#metrics').innerHTML = `
         <div class="metric"><div class="label">Market Value</div><div class="value text-sky-300">${fmtMoney(totalVal)}</div></div>
@@ -723,6 +806,15 @@ VTI,50,240.00,13250.00,Capital One Investing`
         <div class="metric"><div class="label">Unrealized G/L</div><div class="value ${totalGL >= 0 ? 'gain' : 'loss'}">${fmtMoney(totalGL)}</div></div>
         <div class="metric"><div class="label">Tickers / Accts</div><div class="value">${nTickers} / ${nAccts}</div></div>
       `;
+
+      if (!data.length) {
+        $('#panel-overview').innerHTML = `<div class="card p-4 text-center text-slate-400 text-sm">No files selected. Tap a file chip above to show positions.</div>`;
+        $('#panel-positions').innerHTML = '';
+        $('#panel-overlap').innerHTML = '';
+        $('#panel-tlh').innerHTML = '';
+        showTab(currentTab);
+        return;
+      }
 
       renderOverview();
       renderPositions();
@@ -734,7 +826,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
     function renderOverview() {
       const cons = consolidated().slice(0, 12);
       const byAcct = {};
-      holdings.forEach(p => {
+      viewHoldings().forEach(p => {
         byAcct[p.account] = (byAcct[p.account] || 0) + (p.market_value || 0);
       });
       const acctLabels = Object.keys(byAcct);
@@ -845,12 +937,14 @@ VTI,50,240.00,13250.00,Capital One Investing`
                 <th class="py-1.5 text-right">G/L</th>
               </tr></thead>
               <tbody>
-                ${holdings
+                ${viewHoldings()
                   .slice()
                   .sort((a,b) => (b.market_value||0) - (a.market_value||0))
                   .map(p => `
                   <tr class="border-t border-slate-700">
-                    <td class="py-1.5 pr-2 font-medium text-sky-300">${p.ticker}</td>
+                    <td class="py-1.5 pr-2 font-medium text-sky-300">${p.ticker}
+                      <div class="text-[10px] text-slate-500 font-normal truncate max-w-[100px]">${shortName(p.source_file)}</div>
+                    </td>
                     <td class="py-1.5 pr-2 text-xs text-slate-400 truncate max-w-[90px]">${p.account}</td>
                     <td class="py-1.5 pr-2 text-right">${fmtMoney(p.market_value)}</td>
                     <td class="py-1.5 text-right ${ (p.unrealized_gl||0) >= 0 ? 'gain' : 'loss'}">${fmtMoney(p.unrealized_gl)}</td>
@@ -866,7 +960,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
     function renderOverlap() {
       const shared = sharedTickers();
       const cons = consolidated();
-      const totalPortfolio = holdings.reduce((s, p) => s + (p.market_value || 0), 0) || 1;
+      const totalPortfolio = viewHoldings().reduce((s, p) => s + (p.market_value || 0), 0) || 1;
 
       // ---- Look-through analysis ----
       // Identify funds via ticker OR description matching
@@ -1167,7 +1261,17 @@ VTI,50,240.00,13250.00,Capital One Investing`
     }
 
     // ========== Events ==========
-    $('#fileInput').addEventListener('change', (e) => handleFiles(e.target.files));
+    $('#fileInput').addEventListener('change', (e) => {
+      handleFiles(e.target.files);
+      e.target.value = ''; // allow re-selecting the same file later
+    });
+
+    // Add-files button (shown on dashboard) reuses the same file input
+    document.addEventListener('click', (e) => {
+      if (e.target && e.target.id === 'btnAddFiles') {
+        $('#fileInput').click();
+      }
+    });
 
     const dropZone = $('#dropZone');
     dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drag'); });
@@ -1185,6 +1289,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
     $('#btnClear').addEventListener('click', () => {
       if (confirm('Clear all loaded holdings?')) {
         holdings = [];
+        activeSources = null;
         saveState();
         renderAll();
         toast('Cleared');
@@ -1192,10 +1297,11 @@ VTI,50,240.00,13250.00,Capital One Investing`
     });
 
     $('#btnExport').addEventListener('click', () => {
-      if (!holdings.length) return;
+      const data = viewHoldings();
+      if (!data.length) return;
       const headers = ['broker','account','ticker','description','shares','last_price','market_value','cost_basis','unrealized_gl','asset_type','source_file'];
       const csv = [headers.join(',')].concat(
-        holdings.map(p => headers.map(h => {
+        data.map(p => headers.map(h => {
           let v = p[h];
           if (v == null) return '';
           if (typeof v === 'string' && (v.includes(',') || v.includes('"'))) return `"${v.replace(/"/g,'""')}"`;
