@@ -41,7 +41,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v24</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v25</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -452,7 +452,7 @@
       // Normalized CSVs with a Symbol column must use the standard parser even if
       // the filename contains "Baird".
       const hasSecurityIdRows = rows.some(r =>
-        Object.values(r || {}).some(v => /^Security ID:\s*/i.test(String(v || '').trim()))
+        Object.values(r || {}).some(v => /Security ID\s*:/i.test(String(v || '').trim()))
       );
 
       if (hasSecurityIdRows) {
@@ -528,7 +528,7 @@
         (row || []).map(c => (c == null ? '' : String(c).trim()))
       );
       const hasSecId = asStrings.some(row =>
-        row.some(c => /^Security ID:\s*/i.test(c))
+        row.some(c => /Security ID\s*:/i.test(c))
       );
 
       // Only use Security-ID parser when those rows exist (not merely because name says Baird)
@@ -547,6 +547,25 @@
         objs.push(obj);
       }
       return parseRows(objs, headers, broker, sourceName);
+    }
+
+    // Fallback: parse Baird-style sheet after SheetJS converts it to CSV text
+    function parseBairdFromCsvText(csvText, broker, sourceName) {
+      const lines = String(csvText || '').split(/\r?\n/);
+      const rows = lines.map(line => {
+        // Simple CSV split (Baird fields rarely have embedded commas in critical cols)
+        const cells = [];
+        let cur = '', inQ = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (ch === '"') { inQ = !inQ; continue; }
+          if (ch === ',' && !inQ) { cells.push(cur.trim()); cur = ''; continue; }
+          cur += ch;
+        }
+        cells.push(cur.trim());
+        return cells;
+      });
+      return parseBairdMatrix(rows, rows, broker, sourceName);
     }
 
     function parseBairdMatrix(strRows, rawRows, broker, sourceName) {
@@ -576,11 +595,12 @@
         const raw = rawRows[ri] || [];
         if (!cells || !cells.length) continue;
 
-        // Security ID header row
+        // Security ID header row (allow "Security ID: AAPL" or "Security ID : AAPL")
         let secId = null;
         for (const c of cells) {
-          if (/^Security ID:\s*/i.test(c)) {
-            secId = c.replace(/^Security ID:\s*/i, '').trim().toUpperCase();
+          const m = String(c).match(/^Security ID\s*:\s*(.+)$/i);
+          if (m) {
+            secId = m[1].trim().toUpperCase();
             break;
           }
         }
@@ -690,8 +710,9 @@
         // 1. Detect "Security ID: TICKER" row
         let secId = null;
         for (const s of vals) {
-          if (/^Security ID:\s*/i.test(s)) {
-            secId = s.replace(/^Security ID:\s*/i, '').trim().toUpperCase();
+          const m = String(s).match(/^Security ID\s*:\s*(.+)$/i);
+          if (m) {
+            secId = m[1].trim().toUpperCase();
             break;
           }
         }
@@ -886,7 +907,7 @@
         const name = (file.name || 'upload').toLowerCase();
         const broker = detectBroker(name) || 'Generic';
 
-        if (isSpreadsheet(file)) {
+        if (isSpreadsheet(file) || /\.xlsx?$/i.test(file.name || '') || /baird/i.test(file.name || '')) {
           if (typeof XLSX === 'undefined') {
             toast('Excel library missing — reload page on Wi‑Fi');
             pending--;
@@ -896,29 +917,56 @@
           const reader = new FileReader();
           reader.onload = (e) => {
             try {
-              const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
+              let wb;
+              try {
+                wb = XLSX.read(e.target.result, { type: 'array', cellDates: true, raw: false });
+              } catch (e1) {
+                // Retry as binary string
+                const u8 = new Uint8Array(e.target.result);
+                let s = '';
+                for (let i = 0; i < u8.length; i++) s += String.fromCharCode(u8[i]);
+                wb = XLSX.read(s, { type: 'binary', cellDates: true });
+              }
               if (!wb.SheetNames || !wb.SheetNames.length) {
                 toast('Excel has no sheets');
               } else {
                 const ws = wb.Sheets[wb.SheetNames[0]];
-                const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
-                let parsed = parseExcelMatrix(matrix, broker, file.name);
+                // Always use array-of-arrays — most reliable for Baird Security ID rows
+                let matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+                if (!matrix.length) {
+                  matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+                }
+                // Normalize every cell to string/number cleanly
+                matrix = matrix.map(row => (row || []).map(c => (c == null ? '' : c)));
+
+                let parsed = [];
+                // 1) Detect Baird Security-ID format anywhere in the sheet
+                const flat = matrix.map(row => row.map(c => String(c).trim()));
+                const hasSecId = flat.some(row => row.some(c => /Security ID\s*:/i.test(c)));
+                if (hasSecId) {
+                  parsed = parseBairdMatrix(flat, matrix, broker || 'RW Baird', file.name);
+                }
+                // 2) Generic matrix → objects path
+                if (!parsed.length) {
+                  parsed = parseExcelMatrix(matrix, broker, file.name);
+                }
+                // 3) Object-mode fallback
                 if (!parsed.length) {
                   const json = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
                   const headers = json.length ? Object.keys(json[0]) : [];
                   parsed = parseRows(json, headers, broker, file.name);
                 }
+                // 4) Last resort: sheet → CSV text → line scan for Security ID
                 if (!parsed.length) {
-                  // Force Baird matrix path regardless of broker name
-                  parsed = parseBairdMatrix(
-                    matrix.map(row => (row || []).map(c => (c == null ? '' : String(c).trim()))),
-                    matrix,
-                    broker || 'RW Baird',
-                    file.name
-                  );
+                  const csvText = XLSX.utils.sheet_to_csv(ws);
+                  if (/Security ID\s*:/i.test(csvText)) {
+                    parsed = parseBairdFromCsvText(csvText, broker || 'RW Baird', file.name);
+                  }
                 }
                 allNew.push(...parsed);
-                if (!parsed.length) {
+                if (parsed.length) {
+                  toast(`Loaded ${parsed.length} from ${shortName(file.name)}`);
+                } else {
                   toast(`No rows from ${file.name} (${matrix.length} sheet rows)`);
                 }
               }
