@@ -47,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v29</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v31</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1586,12 +1586,12 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const excludedRows = holdings.filter(p => isExcludedAccount(p.account));
       const excludedVal = excludedRows.reduce((s, p) => s + (p.market_value || 0), 0);
       const excludedNote = excludedRows.length
-        ? `<div class="mb-2 px-1">
+        ? `<div class="mb-3">
              <button type="button" id="btnExcludedInfo"
-               class="text-[11px] text-sky-400 underline underline-offset-2 active:text-sky-300">
+               class="text-xs font-medium text-sky-300 border border-sky-700/60 rounded-lg px-3 py-1.5 active:bg-slate-800">
                More info
              </button>
-             <div id="excludedInfoPanel" class="hidden mt-1.5 text-[11px] text-slate-400 leading-snug">
+             <div id="excludedInfoPanel" class="hidden mt-2 text-[11px] text-slate-400 leading-snug px-0.5">
                Excluded ${excludedRows.length} position(s) in kids’ accounts
                (…5882 Christian, …0786 Julia, …6963 Jacob, …4623 Annalise)
                totaling ${fmtMoney(excludedVal)} — not part of your portfolio totals.
