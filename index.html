@@ -16,6 +16,7 @@
     :root { color-scheme: dark; }
     body { background: #0f172a; color: #e2e8f0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
+    .safe-top { padding-top: max(0.85rem, env(safe-area-inset-top, 0px)); }
     .card { background: #1e293b; border-radius: 1rem; border: 1px solid #334155; }
     .metric { background: #1e293b; border-radius: 0.75rem; padding: 0.85rem 0.75rem; text-align: center; border: 1px solid #334155; }
     .metric .label { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; }
@@ -36,11 +37,11 @@
 <body class="min-h-screen flex flex-col">
 
   <!-- Header -->
-  <header class="sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-700 px-4 py-3">
+  <header class="sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-700 px-4 pb-3 safe-top">
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v17</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v18</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -98,7 +99,7 @@
       <div class="grid grid-cols-2 gap-2 mb-3" id="metrics"></div>
 
       <!-- Tabs -->
-      <div class="flex border-b border-slate-700 mb-3 sticky top-14 bg-slate-900 z-30 -mx-3 px-3">
+      <div class="flex border-b border-slate-700 mb-3 sticky bg-slate-900 z-30 -mx-3 px-3" style="top: calc(env(safe-area-inset-top, 0px) + 3.25rem);">
         <button class="tab-btn active" data-tab="overview">Overview</button>
         <button class="tab-btn" data-tab="positions">Positions</button>
         <button class="tab-btn" data-tab="overlap">Look-thru</button>
@@ -157,6 +158,33 @@
       let n = String(name).replace(/^.*[\\/]/, '');
       if (n.length > 28) n = n.slice(0, 12) + '…' + n.slice(-12);
       return n;
+    }
+
+    // CUSIPs / opaque IDs (e.g. 53407L275, 46849B384) — prefer description for display
+    function isOpaqueId(ticker) {
+      const t = String(ticker || '').trim();
+      if (!t) return true;
+      if (/^UNKNOWN$/i.test(t)) return true;
+      // Standard CUSIP: 9 alphanumeric chars
+      if (/^[0-9A-Z]{9}$/i.test(t) && /\d/.test(t) && /[A-Z]/i.test(t)) return true;
+      // Mostly numeric long codes
+      if (/^\d{6,}$/.test(t)) return true;
+      // Internal plan codes already handled elsewhere (NON…)
+      return false;
+    }
+
+    function displayLabel(ticker, description) {
+      const t = String(ticker || '').trim();
+      const d = String(description || '').trim();
+      if (isOpaqueId(t) && d.length > 2) {
+        // Shorten long fund names for list views
+        const short = d.length > 36 ? d.slice(0, 34) + '…' : d;
+        return { primary: short, secondary: t };
+      }
+      if (/^NON/i.test(t) && d.length > 2) {
+        return { primary: t, secondary: d.length > 36 ? d.slice(0, 34) + '…' : d };
+      }
+      return { primary: t, secondary: (d && d.toUpperCase() !== t.toUpperCase()) ? (d.length > 36 ? d.slice(0, 34) + '…' : d) : '' };
     }
 
     // ========== Helpers ==========
@@ -928,9 +956,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
           n_accounts: c.accounts.size,
           accounts_str: [...c.accounts].sort().join(', '),
           weight: (c.total_value / total) * 100,
-          displayName: (c.description && c.description.length > 3 && /^NON|XXXX/i.test(c.ticker))
-            ? c.description.substring(0, 40)
-            : c.ticker
+          ...displayLabel(c.ticker, c.description)
         }))
         .sort((a, b) => b.total_value - a.total_value);
     }
@@ -1177,17 +1203,20 @@ VTI,50,240.00,13250.00,Capital One Investing`
                 <th class="py-1.5 text-right">#Accts</th>
               </tr></thead>
               <tbody>
-                ${cons.map(c => `
+                ${cons.map(c => {
+                  const lab = displayLabel(c.ticker, c.description);
+                  return `
                   <tr class="border-t border-slate-700">
                     <td class="py-1.5 pr-2 font-medium text-sky-300">
-                      ${c.ticker}
-                      ${c.displayName && c.displayName !== c.ticker ? `<div class="text-[10px] text-slate-400 font-normal truncate max-w-[140px]">${c.displayName}</div>` : ''}
+                      ${lab.primary}
+                      ${lab.secondary ? `<div class="text-[10px] text-slate-400 font-normal truncate max-w-[160px]">${lab.secondary}</div>` : ''}
                       ${c.fundKey ? `<div class="text-[10px] text-emerald-500/80 font-normal">→ ${c.fundKey}</div>` : ''}
                     </td>
                     <td class="py-1.5 pr-2 text-right">${fmt(c.total_shares, 2)}</td>
                     <td class="py-1.5 pr-2 text-right">${fmtMoney(c.total_value)}</td>
                     <td class="py-1.5 text-right">${c.n_accounts}</td>
-                  </tr>`).join('')}
+                  </tr>`;
+                }).join('')}
               </tbody>
             </table>
           </div>
@@ -1206,15 +1235,19 @@ VTI,50,240.00,13250.00,Capital One Investing`
                 ${viewHoldings()
                   .slice()
                   .sort((a,b) => (b.market_value||0) - (a.market_value||0))
-                  .map(p => `
+                  .map(p => {
+                    const lab = displayLabel(p.ticker, p.description);
+                    return `
                   <tr class="border-t border-slate-700">
-                    <td class="py-1.5 pr-2 font-medium text-sky-300">${p.ticker}
+                    <td class="py-1.5 pr-2 font-medium text-sky-300">${lab.primary}
+                      ${lab.secondary ? `<div class="text-[10px] text-slate-400 font-normal truncate max-w-[120px]">${lab.secondary}</div>` : ''}
                       <div class="text-[10px] text-slate-500 font-normal truncate max-w-[100px]">${shortName(p.source_file)}</div>
                     </td>
                     <td class="py-1.5 pr-2 text-xs text-slate-400 truncate max-w-[90px]">${p.account}</td>
                     <td class="py-1.5 pr-2 text-right">${fmtMoney(p.market_value)}</td>
                     <td class="py-1.5 text-right ${ (p.unrealized_gl||0) >= 0 ? 'gain' : 'loss'}">${fmtMoney(p.unrealized_gl)}</td>
-                  </tr>`).join('')}
+                  </tr>`;
+                  }).join('')}
               </tbody>
             </table>
           </div>
@@ -1263,16 +1296,29 @@ VTI,50,240.00,13250.00,Capital One Investing`
         e.total = e.direct + throughSum;
       });
 
+      // Map ticker → description for readable labels (CUSIPs, etc.)
+      const descByTicker = {};
+      cons.forEach(c => {
+        if (c.description && (!descByTicker[c.ticker] || c.description.length > descByTicker[c.ticker].length)) {
+          descByTicker[c.ticker] = c.description;
+        }
+      });
+
       const topUnderlying = Object.entries(exposure)
-        .map(([ticker, e]) => ({
-          ticker,
-          direct: e.direct,
-          through: e.through,
-          throughSum: Object.values(e.through).reduce((s, v) => s + v, 0),
-          total: e.total,
-          weight: (e.total / totalPortfolio) * 100,
-          fundCount: Object.keys(e.through).length
-        }))
+        .map(([ticker, e]) => {
+          const lab = displayLabel(ticker, descByTicker[ticker] || '');
+          return {
+            ticker,
+            label: lab.primary,
+            sublabel: lab.secondary,
+            direct: e.direct,
+            through: e.through,
+            throughSum: Object.values(e.through).reduce((s, v) => s + v, 0),
+            total: e.total,
+            weight: (e.total / totalPortfolio) * 100,
+            fundCount: Object.keys(e.through).length
+          };
+        })
         .sort((a, b) => b.total - a.total)
         .slice(0, 25);
 
@@ -1310,7 +1356,10 @@ VTI,50,240.00,13250.00,Capital One Investing`
               <tbody>
                 ${topUnderlying.map(u => `
                   <tr class="border-t border-slate-700">
-                    <td class="py-1.5 pr-2 font-medium text-sky-300">${u.ticker}</td>
+                    <td class="py-1.5 pr-2 font-medium text-sky-300">
+                      ${u.label}
+                      ${u.sublabel ? `<div class="text-[10px] text-slate-500 font-normal">${u.sublabel}</div>` : ''}
+                    </td>
                     <td class="py-1.5 pr-2 text-right text-xs">${u.direct ? fmtMoney(u.direct) : '—'}</td>
                     <td class="py-1.5 pr-2 text-right text-xs">${u.throughSum ? fmtMoney(u.throughSum) : '—'}</td>
                     <td class="py-1.5 pr-2 text-right font-medium">${fmtMoney(u.total)}</td>
@@ -1334,7 +1383,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
               });
               return `
                 <div class="text-xs bg-slate-800/60 rounded-lg px-2.5 py-2">
-                  <div class="font-medium text-slate-200 mb-0.5">${u.ticker} <span class="text-slate-500 font-normal">(${fmt(u.weight,1)}% of portfolio)</span></div>
+                  <div class="font-medium text-slate-200 mb-0.5">${u.label} <span class="text-slate-500 font-normal">(${fmt(u.weight,1)}% of portfolio)</span></div>
+                  ${u.sublabel ? `<div class="text-[10px] text-slate-500 mb-0.5">${u.sublabel}</div>` : ''}
                   <div class="text-slate-400">${parts.join(' · ')}</div>
                 </div>`;
             }).join('')}
