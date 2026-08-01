@@ -41,7 +41,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v18</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v19</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -739,6 +739,45 @@
     }
 
     // ========== File loading ==========
+    // E*TRADE (and some other brokers) put summary/filter rows above the real table.
+    // Find the true header line that contains Symbol + (Quantity|Value|Price).
+    function extractPositionsCsv(text) {
+      const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/);
+      let headerIdx = -1;
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        const lower = line.toLowerCase();
+        // Real positions header: has Symbol/Ticker AND a qty or value column
+        const hasSym = /(^|,)\s*symbol\s*(,|$)/i.test(line) || /(^|,)\s*ticker\s*(,|$)/i.test(line);
+        const hasQty = /quantity|qty|shares/i.test(lower);
+        const hasVal = /value\s*\$|market\s*value|current\s*value|(^|,)\s*value\s*(,|$)/i.test(line);
+        const hasPrice = /last\s*price|price\s*\$|(^|,)\s*price\s*(,|$)/i.test(line);
+        // Prefer the positions table over filter rows like "Symbol,Security type(s),Sort by"
+        if (hasSym && (hasQty || hasVal) && (hasPrice || hasQty)) {
+          // Reject filter-only headers
+          if (/security type|sort by|sort order/i.test(lower) && !hasQty) continue;
+          headerIdx = i;
+          break;
+        }
+      }
+      if (headerIdx < 0) {
+        // Fallback: first line that starts with Symbol,
+        for (let i = 0; i < lines.length; i++) {
+          if (/^symbol\s*,/i.test(lines[i].trim())) { headerIdx = i; break; }
+        }
+      }
+      if (headerIdx < 0) return text; // nothing found — parse as-is
+
+      // Keep header + data; stop at TOTAL / Generated / empty trailing junk is ok (parser skips)
+      const kept = [];
+      for (let i = headerIdx; i < lines.length; i++) {
+        const t = lines[i].trim();
+        if (/^generated at/i.test(t)) break;
+        kept.push(lines[i]);
+      }
+      return kept.join('\n');
+    }
+
     function isSpreadsheet(file) {
       const name = (file.name || '').toLowerCase();
       const type = (file.type || '').toLowerCase();
@@ -816,25 +855,43 @@
           };
           reader.readAsArrayBuffer(file);
         } else if (isCsvLike(file)) {
-          Papa.parse(file, {
-            header: true,
-            skipEmptyLines: true,
-            complete: (res) => {
-              let parsed = parseRows(res.data, res.meta.fields || [], broker, file.name);
-              if (!parsed.length) {
-                const hasSec = (res.data || []).some(r =>
-                  Object.values(r || {}).some(v => /^Security ID:\s*/i.test(String(v || '').trim()))
-                );
-                if (hasSec) {
-                  parsed = parseBairdStyle(res.data, res.meta.fields || [], broker || 'RW Baird', file.name, {});
-                }
-              }
-              allNew.push(...parsed);
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            try {
+              const text = String(e.target.result || '');
+              const cleaned = extractPositionsCsv(text);
+              Papa.parse(cleaned, {
+                header: true,
+                skipEmptyLines: true,
+                complete: (res) => {
+                  let parsed = parseRows(res.data, res.meta.fields || [], broker, file.name);
+                  if (!parsed.length) {
+                    const hasSec = (res.data || []).some(r =>
+                      Object.values(r || {}).some(v => /^Security ID:\s*/i.test(String(v || '').trim()))
+                    );
+                    if (hasSec) {
+                      parsed = parseBairdStyle(res.data, res.meta.fields || [], broker || 'RW Baird', file.name, {});
+                    }
+                  }
+                  allNew.push(...parsed);
+                  if (!parsed.length) toast(`No positions in ${file.name}`);
+                  pending--;
+                  if (pending === 0) finishLoad(allNew);
+                },
+                error: () => { pending--; if (pending === 0) finishLoad(allNew); }
+              });
+            } catch (err) {
+              toast('CSV error: ' + (err.message || 'unknown'));
               pending--;
               if (pending === 0) finishLoad(allNew);
-            },
-            error: () => { pending--; if (pending === 0) finishLoad(allNew); }
-          });
+            }
+          };
+          reader.onerror = () => {
+            toast('Could not read CSV');
+            pending--;
+            if (pending === 0) finishLoad(allNew);
+          };
+          reader.readAsText(file);
         } else {
           // Last resort: try as Excel
           if (typeof XLSX !== 'undefined') {
