@@ -9,7 +9,8 @@
   <title>Portfolio Analyzer</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"></script>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js"
+          onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'"></script>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
   <style>
     :root { color-scheme: dark; }
@@ -39,7 +40,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v14</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v15</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -707,55 +708,126 @@
     }
 
     // ========== File loading ==========
+    function isSpreadsheet(file) {
+      const name = (file.name || '').toLowerCase();
+      const type = (file.type || '').toLowerCase();
+      if (/\.xlsx?$|\.xlsm$/i.test(name)) return true;
+      if (type.includes('spreadsheet') || type.includes('excel') || type.includes('sheet')) return true;
+      if ((type === 'application/octet-stream' || type === '') &&
+          /baird|fidelity|holdings|portfolio|positions|\.xls/i.test(name)) return true;
+      return false;
+    }
+
+    function isCsvLike(file) {
+      const name = (file.name || '').toLowerCase();
+      const type = (file.type || '').toLowerCase();
+      if (name.endsWith('.csv') || name.endsWith('.txt')) return true;
+      if (type.includes('csv') || type === 'text/plain' || type === 'text/csv') return true;
+      return false;
+    }
+
     function handleFiles(files) {
       if (!files || !files.length) return;
       let pending = files.length;
       const allNew = [];
 
       Array.from(files).forEach(file => {
-        const name = file.name.toLowerCase();
+        const name = (file.name || 'upload').toLowerCase();
         const broker = detectBroker(name) || 'Generic';
 
-        if (name.endsWith('.csv') || name.endsWith('.txt')) {
+        if (isSpreadsheet(file)) {
+          if (typeof XLSX === 'undefined') {
+            toast('Excel library missing — reload page on Wi‑Fi');
+            pending--;
+            if (pending === 0) finishLoad(allNew);
+            return;
+          }
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            try {
+              const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true });
+              if (!wb.SheetNames || !wb.SheetNames.length) {
+                toast('Excel has no sheets');
+              } else {
+                const ws = wb.Sheets[wb.SheetNames[0]];
+                const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+                let parsed = parseExcelMatrix(matrix, broker, file.name);
+                if (!parsed.length) {
+                  const json = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+                  const headers = json.length ? Object.keys(json[0]) : [];
+                  parsed = parseRows(json, headers, broker, file.name);
+                }
+                if (!parsed.length) {
+                  // Force Baird matrix path regardless of broker name
+                  parsed = parseBairdMatrix(
+                    matrix.map(row => (row || []).map(c => (c == null ? '' : String(c).trim()))),
+                    matrix,
+                    broker || 'RW Baird',
+                    file.name
+                  );
+                }
+                allNew.push(...parsed);
+                if (!parsed.length) {
+                  toast(`No rows from ${file.name} (${matrix.length} sheet rows)`);
+                }
+              }
+            } catch (err) {
+              console.error(err);
+              toast('Excel error: ' + (err && err.message ? err.message : 'unknown'));
+            }
+            pending--;
+            if (pending === 0) finishLoad(allNew);
+          };
+          reader.onerror = () => {
+            toast('Could not read file');
+            pending--;
+            if (pending === 0) finishLoad(allNew);
+          };
+          reader.readAsArrayBuffer(file);
+        } else if (isCsvLike(file)) {
           Papa.parse(file, {
             header: true,
             skipEmptyLines: true,
             complete: (res) => {
-              const parsed = parseRows(res.data, res.meta.fields || [], broker, file.name);
+              let parsed = parseRows(res.data, res.meta.fields || [], broker, file.name);
+              if (!parsed.length) {
+                const hasSec = (res.data || []).some(r =>
+                  Object.values(r || {}).some(v => /^Security ID:\s*/i.test(String(v || '').trim()))
+                );
+                if (hasSec) {
+                  parsed = parseBairdStyle(res.data, res.meta.fields || [], broker || 'RW Baird', file.name, {});
+                }
+              }
               allNew.push(...parsed);
               pending--;
               if (pending === 0) finishLoad(allNew);
             },
             error: () => { pending--; if (pending === 0) finishLoad(allNew); }
           });
-        } else if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
-          const reader = new FileReader();
-          reader.onload = (e) => {
-            try {
-              const wb = XLSX.read(e.target.result, { type: 'array' });
-              const ws = wb.Sheets[wb.SheetNames[0]];
-              // Prefer raw matrix — more reliable for Baird-style Security ID rows
-              const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
-              let parsed = parseExcelMatrix(matrix, broker, file.name);
-              if (!parsed.length) {
-                // Fallback: object mode
-                const json = XLSX.utils.sheet_to_json(ws, { defval: '' });
-                const headers = json.length ? Object.keys(json[0]) : [];
-                parsed = parseRows(json, headers, broker, file.name);
+        } else {
+          // Last resort: try as Excel
+          if (typeof XLSX !== 'undefined') {
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              try {
+                const wb = XLSX.read(e.target.result, { type: 'array' });
+                const ws = wb.Sheets[wb.SheetNames[0]];
+                const matrix = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: true });
+                const parsed = parseExcelMatrix(matrix, broker, file.name);
+                allNew.push(...parsed);
+                if (!parsed.length) toast(`Could not parse ${file.name}`);
+              } catch (err) {
+                toast('Unsupported file type');
               }
-              allNew.push(...parsed);
-            } catch (err) {
-              console.error(err);
-              toast('Excel parse error: ' + (err.message || 'unknown'));
-            }
+              pending--;
+              if (pending === 0) finishLoad(allNew);
+            };
+            reader.readAsArrayBuffer(file);
+          } else {
+            toast('Use CSV or Excel (.xlsx)');
             pending--;
             if (pending === 0) finishLoad(allNew);
-          };
-          reader.readAsArrayBuffer(file);
-        } else {
-          toast('Use CSV or Excel files');
-          pending--;
-          if (pending === 0) finishLoad(allNew);
+          }
         }
       });
     }
