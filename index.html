@@ -47,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v33</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v34</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -147,7 +147,7 @@
     let lastPriceRefresh = null; // { at: Date, updated: n, failed: n, asOf: string }
     let priceCache = {}; // ticker -> { price, asOf, source }
 
-    // Primary residence — Redfin estimate (Aug 2026); editable on Overview
+    // Primary residence — Redfin estimate only (updated via Refresh prices)
     let homeAsset = {
       enabled: true,
       address: '3903 Harlington Ln, Richardson, TX 75082',
@@ -1734,31 +1734,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
             + (lastPriceRefresh.failed ? ` · ${lastPriceRefresh.failed} failed` : '')
         : 'Uses statement values until you refresh. Stocks/ETFs = prior close; annuities ≈ SPY-scaled; home = Redfin when available.';
 
-      const homeCard = `
-        <div class="card p-3 mb-3 border border-emerald-800/40">
-          <div class="flex items-start justify-between gap-2 mb-1">
-            <div>
-              <h3 class="text-sm font-semibold text-emerald-300">Primary residence</h3>
-              <p class="text-[11px] text-slate-400 mt-0.5">${homeAsset.address}</p>
-              <p class="text-[11px] text-slate-500">${homeAsset.beds} bd · ${homeAsset.baths} ba · ${homeAsset.sqft.toLocaleString()} sq ft · built ${homeAsset.yearBuilt}</p>
-            </div>
-            <label class="flex items-center gap-1.5 text-[11px] text-slate-400 shrink-0">
-              <input type="checkbox" id="homeEnabled" ${homeAsset.enabled ? 'checked' : ''} class="rounded" />
-              Include
-            </label>
-          </div>
-          <div class="flex items-center gap-2 mt-2">
-            <span class="text-xs text-slate-400">Estimate $</span>
-            <input type="number" id="homeValueInput" value="${Math.round(homeAsset.value)}"
-              class="bg-slate-800 border border-slate-600 rounded-lg px-2 py-1 text-sm text-emerald-200 w-32" />
-            <button type="button" id="btnSaveHome" class="text-xs bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg px-2.5 py-1">Save</button>
-          </div>
-          <p class="text-[10px] text-slate-500 mt-1.5">Source: ${homeAsset.source} · not a formal appraisal · edit anytime</p>
-        </div>`;
-
       let html = `
         ${excludedNote}
-        ${homeCard}
         <div class="card p-3 mb-3 border border-sky-800/50">
           <div class="flex items-center justify-between gap-2 mb-1">
             <h3 class="text-sm font-semibold text-slate-300">Live-ish valuation</h3>
@@ -1834,24 +1811,6 @@ VTI,50,240.00,13250.00,Capital One Investing`
           }
         };
       }
-
-      const homeEn = document.getElementById('homeEnabled');
-      if (homeEn) homeEn.onchange = () => {
-        homeAsset.enabled = !!homeEn.checked;
-        try { localStorage.setItem('portfolio_home_v1', JSON.stringify(homeAsset)); } catch (_) {}
-        renderAll();
-      };
-      const btnHome = document.getElementById('btnSaveHome');
-      if (btnHome) btnHome.onclick = () => {
-        const inp = document.getElementById('homeValueInput');
-        const v = parseFloat(inp && inp.value);
-        if (!isNaN(v) && v >= 0) {
-          homeAsset.value = v;
-          try { localStorage.setItem('portfolio_home_v1', JSON.stringify(homeAsset)); } catch (_) {}
-          toast('Home value saved: ' + fmtMoney(v));
-          renderAll();
-        }
-      };
 
       // Charts (mobile-friendly)
       setTimeout(() => {
