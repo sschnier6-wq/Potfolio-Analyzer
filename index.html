@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v41</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v44</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -112,12 +112,17 @@
           <button type="button" id="btnHomeManage" class="text-[11px] text-sky-400 font-semibold px-1">Manage properties</button>
         </div>
         <div id="homeManagePanel" class="hidden mt-2 card p-2.5 border border-emerald-800/40">
-          <p class="text-[11px] text-slate-400 mb-2">Add one or more addresses. Estimates try Redfin when you refresh or tap Lookup. You can also type a value.</p>
+          <p class="text-[11px] text-slate-400 mb-2">Add a label/address and your own dollar value. Nothing is looked up online.</p>
           <div id="homePropList" class="space-y-2 mb-2"></div>
-          <div class="flex gap-1.5">
-            <input id="homeAddrInput" type="text" placeholder="Street, City, ST ZIP"
-              class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-slate-200" />
-            <button type="button" id="btnHomeAdd" class="text-xs bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg px-2.5 py-1.5 shrink-0">Add</button>
+          <div class="flex flex-col gap-1.5">
+            <input id="homeAddrInput" type="text" placeholder="Address or label (e.g. Primary home)"
+              class="w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-slate-200" />
+            <div class="flex gap-1.5 items-center">
+              <span class="text-[11px] text-slate-500">$</span>
+              <input id="homeValInput" type="number" inputmode="decimal" placeholder="Value"
+                class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-emerald-200" />
+              <button type="button" id="btnHomeAdd" class="text-xs bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg px-2.5 py-1.5 shrink-0">Add</button>
+            </div>
           </div>
         </div>
       </div>
@@ -1391,20 +1396,28 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
       const addBtn = document.getElementById('btnHomeAdd');
       const addrInp = document.getElementById('homeAddrInput');
+      const valInp = document.getElementById('homeValInput');
       if (addBtn && addrInp) {
-        addBtn.onclick = async () => {
+        addBtn.onclick = () => {
           const addr = (addrInp.value || '').trim();
-          if (!addr) { toast('Enter an address'); return; }
+          const val = parseFloat(valInp && valInp.value);
+          if (!addr) { toast('Enter an address or label'); return; }
+          if (isNaN(val) || val < 0) { toast('Enter a dollar value'); return; }
           const id = 'p' + Date.now();
-          homeSettings.properties.push({ id, address: addr, value: 0, source: 'pending', redfinUrl: '' });
+          homeSettings.properties.push({
+            id,
+            address: addr,
+            value: val,
+            source: 'manual entry',
+            refreshedAt: new Date().toLocaleDateString()
+          });
           addrInp.value = '';
-          saveHomeSettings();
-          fillHomePropList();
-          toast('Looking up estimate…');
-          await lookupPropertyEstimate(id);
+          if (valInp) valInp.value = '';
           if (homeSettings.properties.length === 1) homeSettings.include = true;
           saveHomeSettings();
+          fillHomePropList();
           renderAll();
+          toast('Added ' + addr + ' · ' + fmtMoney(val));
         };
       }
       if (panel && !panel.classList.contains('hidden')) fillHomePropList();
@@ -1424,11 +1437,10 @@ VTI,50,240.00,13250.00,Capital One Investing`
           <div class="flex items-center gap-1.5 mt-1.5">
             <span class="text-[10px] text-slate-500">$</span>
             <input type="number" class="home-val-input bg-slate-900 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-emerald-200 w-28"
-              value="${p.value ? Math.round(p.value) : ''}" placeholder="estimate" />
-            <button type="button" class="home-lookup text-[10px] text-sky-400 px-1">Lookup</button>
+              value="${p.value ? Math.round(p.value) : ''}" placeholder="value" />
             <button type="button" class="home-remove text-[10px] text-rose-400 px-1">Remove</button>
           </div>
-          <div class="text-[10px] text-slate-500 mt-0.5">${p.source || ''}${p.refreshedAt ? ' · ' + p.refreshedAt : ''}</div>
+          <div class="text-[10px] text-slate-500 mt-0.5">Manual value</div>
         </div>
       `).join('');
 
@@ -1442,21 +1454,14 @@ VTI,50,240.00,13250.00,Capital One Investing`
             const v = parseFloat(inp.value);
             if (!isNaN(v) && v >= 0) {
               prop.value = v;
-              prop.source = prop.source && prop.source.includes('manual') ? prop.source : 'manual entry';
+              prop.source = 'manual entry';
+              prop.refreshedAt = new Date().toLocaleDateString();
               saveHomeSettings();
               renderHomeControls();
               renderAll();
             }
           };
         }
-        const lu = row.querySelector('.home-lookup');
-        if (lu) lu.onclick = async () => {
-          toast('Looking up…');
-          await lookupPropertyEstimate(id);
-          saveHomeSettings();
-          fillHomePropList();
-          renderAll();
-        };
         const rm = row.querySelector('.home-remove');
         if (rm) rm.onclick = () => {
           homeSettings.properties = homeSettings.properties.filter(x => x.id !== id);
@@ -1635,101 +1640,9 @@ VTI,50,240.00,13250.00,Capital One Investing`
       throw lastErr || new Error('fetch failed');
     }
 
-    function parseRedfinEstimate(html) {
-      if (!html || html.length < 400) return null;
-      let m =
-        html.match(/"predictedValue"\s*:\s*(\d+(?:\.\d+)?)/i) ||
-        html.match(/"avmValue"\s*:\s*(\d+(?:\.\d+)?)/i) ||
-        html.match(/"amount"\s*:\s*(\d{5,7})\s*,\s*"currencyCode"\s*:\s*"USD"/i) ||
-        html.match(/Redfin Estimate[^$]{0,40}\$([0-9]{3},[0-9]{3})/i) ||
-        html.match(/\$([0-9]{3},[0-9]{3})\s*(?:Redfin Estimate|estimate)/i) ||
-        html.match(/estimate[^$]{0,30}\$([0-9]{3},[0-9]{3})/i);
-      if (!m) return null;
-      const val = parseFloat(String(m[1]).replace(/,/g, ''));
-      if (val >= 50000 && val <= 20000000) return Math.round(val);
-      return null;
-    }
-
-    async function fetchViaProxies(targetUrl) {
-      const urls = [
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
-        `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
-      ];
-      for (const url of urls) {
-        try {
-          const res = await fetch(url, { cache: 'no-store' });
-          if (!res.ok) continue;
-          const text = await res.text();
-          if (text && text.length > 100) return text;
-        } catch (_) {}
-      }
-      return null;
-    }
-
-    async function resolveRedfinUrl(address) {
-      // Autocomplete → property URL
-      const auto = `https://www.redfin.com/stingray/do/location-autocomplete?location=${encodeURIComponent(address)}&v=2`;
-      const body = await fetchViaProxies(auto);
-      if (body) {
-        try {
-          const cleaned = body.replace(/^\{\}\&\&/, ''); // Redfin sometimes prefixes
-          const data = JSON.parse(cleaned);
-          const rows = data?.payload?.sections?.flatMap(s => s.rows || []) || data?.payload?.exactMatch || [];
-          const list = Array.isArray(rows) ? rows : (rows ? [rows] : []);
-          for (const row of list) {
-            const u = row.url || row.uid || row.letter;
-            if (u && String(u).includes('/home/')) {
-              return String(u).startsWith('http') ? u : `https://www.redfin.com${u}`;
-            }
-            if (row.url && /\/[A-Z]{2}\//.test(row.url)) {
-              return String(row.url).startsWith('http') ? row.url : `https://www.redfin.com${row.url}`;
-            }
-          }
-        } catch (_) {}
-        // Fallback: regex path in raw
-        const m = body.match(/\/[A-Z]{2}\/[A-Za-z0-9\-]+\/[A-Za-z0-9\-]+-\d{5}\/home\/\d+/);
-        if (m) return `https://www.redfin.com${m[0]}`;
-      }
-      return null;
-    }
-
-    async function lookupPropertyEstimate(propId) {
-      const prop = (homeSettings.properties || []).find(p => p.id === propId);
-      if (!prop || !prop.address) return null;
-      try {
-        let pageUrl = prop.redfinUrl;
-        if (!pageUrl) pageUrl = await resolveRedfinUrl(prop.address);
-        if (pageUrl) prop.redfinUrl = pageUrl;
-        if (!pageUrl) {
-          prop.source = 'lookup failed — enter value manually';
-          return null;
-        }
-        const html = await fetchViaProxies(pageUrl);
-        const val = parseRedfinEstimate(html || '');
-        if (val) {
-          prop.value = val;
-          prop.source = 'Redfin estimate';
-          prop.refreshedAt = new Date().toLocaleDateString();
-          return val;
-        }
-        prop.source = 'estimate not found — enter value manually';
-        return null;
-      } catch (e) {
-        prop.source = 'lookup error — enter value manually';
-        return null;
-      }
-    }
-
     async function refreshAllHomeEstimates() {
-      if (!homeSettings.include && !(homeSettings.properties || []).length) return { msg: '' };
-      let n = 0;
-      for (const p of homeSettings.properties || []) {
-        if (!p.address) continue;
-        const v = await lookupPropertyEstimate(p.id);
-        if (v) n++;
-      }
-      saveHomeSettings();
-      return { msg: n ? ` · ${n} home estimate(s)` : ' · home estimates unavailable' };
+      // Manual values only — no online property lookup
+      return { msg: '' };
     }
 
     function isAnnuityPosition(p) {
@@ -2002,7 +1915,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const refreshInfo = lastPriceRefresh
         ? `Last refresh ${lastPriceRefresh.at.toLocaleString()} · ${lastPriceRefresh.updated} priced · as-of ${lastPriceRefresh.asOf}`
             + (lastPriceRefresh.failed ? ` · ${lastPriceRefresh.failed} failed` : '')
-        : 'Uses statement values until you refresh. Stocks/ETFs = prior close; annuities ≈ SPY-scaled; homes = Redfin when enabled.';
+        : 'Uses statement values until you refresh. Stocks/ETFs = prior close; annuities ≈ SPY-scaled; homes = your manual values when enabled.';
 
       let html = `
         ${excludedNote}
