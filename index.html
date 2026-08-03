@@ -47,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v35</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v36</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1413,47 +1413,47 @@ VTI,50,240.00,13250.00,Capital One Investing`
           if (!result) throw new Error('no result');
           const meta = result.meta || {};
           const quotes = result.indicators?.quote?.[0];
-          const closes = (quotes?.close || []).filter(x => x != null && !isNaN(x));
-          // Prefer last completed daily close (previous business day when market open)
+          // Keep full close series aligned with timestamps (don't filter before indexing)
+          const rawCloses = quotes?.close || [];
+          const ts = result.timestamp || [];
+          const pairs = [];
+          for (let i = 0; i < rawCloses.length; i++) {
+            if (rawCloses[i] != null && !isNaN(rawCloses[i])) pairs.push({ c: Number(rawCloses[i]), t: ts[i] });
+          }
           let price = null;
+          let dayPrev = null;
           let asOf = '';
-          if (closes.length >= 2) {
-            // If last bar is partial/today, use prior close; else use last close
-            const ts = result.timestamp || [];
-            const lastTs = ts[ts.length - 1];
-            const lastClose = closes[closes.length - 1];
-            const prevClose = closes[closes.length - 2];
-            const now = Date.now() / 1000;
-            // If last timestamp is from "today" in local terms, prefer previous close
-            const lastDate = lastTs ? new Date(lastTs * 1000) : null;
-            const today = new Date();
-            const isSameDay = lastDate && lastDate.toDateString() === today.toDateString();
-            if (isSameDay && prevClose != null) {
-              price = prevClose;
-              asOf = new Date(ts[ts.length - 2] * 1000).toLocaleDateString();
-            } else {
-              price = lastClose;
-              asOf = lastDate ? lastDate.toLocaleDateString() : '';
-            }
-          } else if (closes.length === 1) {
-            price = closes[0];
-            asOf = result.timestamp?.[0] ? new Date(result.timestamp[0] * 1000).toLocaleDateString() : '';
+          if (pairs.length >= 1) {
+            const last = pairs[pairs.length - 1];
+            const lastDate = last.t ? new Date(last.t * 1000) : null;
+            const isSameDay = lastDate && lastDate.toDateString() === new Date().toDateString();
+            // Use last completed session close (skip incomplete "today" bar when present)
+            let idx = pairs.length - 1;
+            if (isSameDay && pairs.length >= 2) idx = pairs.length - 2;
+            price = pairs[idx].c;
+            asOf = pairs[idx].t ? new Date(pairs[idx].t * 1000).toLocaleDateString() : '';
+            // Prior session close for day change (must be the bar before idx, not the same bar)
+            if (idx >= 1) dayPrev = pairs[idx - 1].c;
           }
           if (price == null || isNaN(price)) {
-            price = meta.chartPreviousClose || meta.previousClose || meta.regularMarketPrice;
+            price = meta.regularMarketPrice || meta.chartPreviousClose || meta.previousClose;
             asOf = asOf || 'prior close';
           }
+          if (dayPrev == null) {
+            const cp = meta.chartPreviousClose || meta.previousClose;
+            // Only use as dayPrev if it's different from price
+            if (cp != null && Math.abs(Number(cp) - Number(price)) > 0.0001) dayPrev = Number(cp);
+          }
           if (price == null || isNaN(price) || price <= 0) throw new Error('no price');
-          const prevFromBars = closes.length >= 2 ? closes[closes.length - 2] : (meta.chartPreviousClose || meta.previousClose || null);
           const old = priceCache[t];
+          // On forced refresh, previous refresh price is whatever we had stored
+          const refreshPrev = (old && old.price != null) ? Number(old.price) : null;
           const r = {
             price: Number(price),
             asOf,
             source: 'yahoo',
-            // vs prior trading day (Yahoo)
-            dayPrev: prevFromBars != null ? Number(prevFromBars) : null,
-            // vs last app refresh
-            refreshPrev: old && old.price != null ? old.price : (old && old.refreshPrev != null ? old.refreshPrev : null),
+            dayPrev: dayPrev != null ? Number(dayPrev) : null,
+            refreshPrev,
             name: meta.longName || meta.shortName || t
           };
           priceCache[t] = { ...r, fetchedAt: Date.now() };
@@ -1885,14 +1885,24 @@ VTI,50,240.00,13250.00,Capital One Investing`
       }, 50);
     }
 
+    function priceChangeBase(pc) {
+      if (!pc || pc.price == null) return null;
+      // Prefer change since last app refresh when it actually differs
+      if (pc.refreshPrev != null && Math.abs(pc.price - pc.refreshPrev) > 0.00005) return pc.refreshPrev;
+      // Else day-over-day (prior session close)
+      if (pc.dayPrev != null && Math.abs(pc.price - pc.dayPrev) > 0.00005) return pc.dayPrev;
+      if (pc.refreshPrev != null) return pc.refreshPrev;
+      if (pc.dayPrev != null) return pc.dayPrev;
+      return null;
+    }
+
     function priceCellHtml(ticker) {
       const t = String(ticker || '').toUpperCase();
       const pc = priceCache[t];
       if (!pc || pc.price == null) {
         return `<span class="text-slate-500 text-[11px]">—</span>`;
       }
-      // Prefer change vs last refresh; fall back to day-over-day
-      const base = pc.refreshPrev != null ? pc.refreshPrev : pc.dayPrev;
+      const base = priceChangeBase(pc);
       let cls = 'text-slate-300';
       let arrow = '';
       if (base != null && base > 0) {
@@ -1904,61 +1914,17 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return `<span class="${cls} text-[11px] font-medium">${arrow}$${px}</span>`;
     }
 
-    function closeTickerModal() {
-      const modal = document.getElementById('tickerModal');
-      const frame = document.getElementById('tmFrame');
-      if (frame) frame.src = 'about:blank';
-      if (modal) modal.classList.add('hidden');
-    }
-
-    function openTickerModal(ticker, description) {
+    function openTickerOnYahoo(ticker, description) {
       const t = String(ticker || '').toUpperCase().trim();
-      if (!t || t === 'HOME' || t === 'CASH' || t === 'UNKNOWN') return;
-      // Skip pure CUSIP-only if no yahoo symbol mapping
-      const yahooSym = (/^[A-Z]{1,5}$/.test(t) || /^[A-Z]{1,4}[A-Z0-9]{0,2}$/.test(t)) ? t
-        : (resolveFundKey(t, description) || t);
-      const pc = priceCache[yahooSym] || priceCache[t] || {};
-      const modal = document.getElementById('tickerModal');
-      const title = document.getElementById('tmTitle');
-      const sub = document.getElementById('tmSub');
-      const stats = document.getElementById('tmStats');
-      const frame = document.getElementById('tmFrame');
-      const openBtn = document.getElementById('tmOpenYahoo');
-      if (!modal) return;
-
-      const lab = displayLabel(t, description);
-      if (title) title.textContent = lab.primary || t;
-      if (sub) sub.textContent = (pc.name || lab.secondary || description || yahooSym || '').toString().slice(0, 80);
-
-      let chHtml = '';
-      if (pc.price != null) {
-        const base = pc.refreshPrev != null ? pc.refreshPrev : pc.dayPrev;
-        let chStr = '';
-        if (base != null && base > 0) {
-          const ch = pc.price - base;
-          const pct = (ch / base) * 100;
-          const col = ch > 0 ? 'text-emerald-400' : (ch < 0 ? 'text-rose-400' : 'text-slate-300');
-          chStr = `<span class="${col}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)</span>`;
-        }
-        chHtml = `<div class="flex justify-between gap-2"><span>Last price</span><span class="font-medium">$${Number(pc.price).toFixed(2)} ${chStr}</span></div>
-                  <div class="flex justify-between gap-2 text-slate-500"><span>As of</span><span>${pc.asOf || '—'}</span></div>`;
-      } else {
-        chHtml = `<div class="text-slate-500">No refreshed price yet — tap Refresh prices on Overview.</div>`;
+      if (!t || t === 'HOME' || t === 'CASH' || t === 'UNKNOWN' || t === 'ACCRUED') return;
+      let yahooSym = t;
+      if (!/^[A-Z]{1,5}$/.test(t) && !/^[A-Z]{1,4}[A-Z0-9]{0,2}$/.test(t)) {
+        yahooSym = resolveFundKey(t, description) || t;
       }
-      if (stats) stats.innerHTML = chHtml;
-
+      // Annuity CUSIPs → show SPY as proxy
+      if (t === '53407L275' || t === '46849B384') yahooSym = 'SPY';
       const yahooUrl = `https://finance.yahoo.com/quote/${encodeURIComponent(yahooSym)}`;
-      if (openBtn) {
-        openBtn.onclick = () => { window.open(yahooUrl, '_blank', 'noopener'); };
-      }
-      if (frame) {
-        // Nested Yahoo page (may be blank if Yahoo blocks framing — stats + Yahoo ↗ still work)
-        frame.src = yahooUrl;
-      }
-      modal.classList.remove('hidden');
-      const closeBtn = document.getElementById('tmClose');
-      if (closeBtn) closeBtn.onclick = closeTickerModal;
-      modal.onclick = (e) => { if (e.target === modal) closeTickerModal(); };
+      window.open(yahooUrl, '_blank', 'noopener,noreferrer');
     }
 
     function renderPositions() {
@@ -1998,7 +1964,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
               </tbody>
             </table>
           </div>
-          <p class="text-[10px] text-slate-500 mt-1.5">Price: last refresh (green ▲ / red ▼ vs prior refresh). Tap ticker for Yahoo details.</p>
+          <p class="text-[10px] text-slate-500 mt-1.5">Price: green ▲ / red ▼ vs prior session (or prior refresh). Tap ticker → Yahoo Finance.</p>
         </div>
         <div class="card p-3">
           <h3 class="text-sm font-semibold mb-2">Individual Positions</h3>
@@ -2035,7 +2001,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       $('#panel-positions').innerHTML = html;
       $('#panel-positions').querySelectorAll('.ticker-link').forEach(btn => {
         btn.addEventListener('click', () => {
-          openTickerModal(btn.getAttribute('data-ticker'), btn.getAttribute('data-desc'));
+          openTickerOnYahoo(btn.getAttribute('data-ticker'), btn.getAttribute('data-desc'));
         });
       });
     }
