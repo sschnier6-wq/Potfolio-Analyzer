@@ -47,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v34</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v35</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -137,6 +137,23 @@
   </div>
 
   <div id="toast"></div>
+
+  <!-- In-page ticker detail (Yahoo nested when possible) -->
+  <div id="tickerModal" class="fixed inset-0 z-50 hidden" style="background:rgba(2,6,23,0.72);">
+    <div class="absolute inset-x-0 bottom-0 top-12 mx-auto max-w-lg flex flex-col rounded-t-2xl bg-slate-900 border border-slate-700 overflow-hidden"
+         style="padding-bottom: env(safe-area-inset-bottom);">
+      <div class="flex items-center gap-2 px-3 py-2 border-b border-slate-700 shrink-0">
+        <div class="min-w-0 flex-1">
+          <div id="tmTitle" class="text-sm font-semibold text-sky-300 truncate">Ticker</div>
+          <div id="tmSub" class="text-[11px] text-slate-400 truncate"></div>
+        </div>
+        <button type="button" id="tmOpenYahoo" class="text-[11px] text-sky-400 border border-slate-600 rounded-lg px-2 py-1 shrink-0">Yahoo ↗</button>
+        <button type="button" id="tmClose" class="text-slate-300 text-lg leading-none px-2 py-1 shrink-0" aria-label="Close">×</button>
+      </div>
+      <div id="tmStats" class="px-3 py-2 text-xs text-slate-300 border-b border-slate-800 shrink-0"></div>
+      <iframe id="tmFrame" class="flex-1 w-full bg-white" style="min-height:50vh;border:0;" sandbox="allow-scripts allow-same-origin allow-popups allow-forms"></iframe>
+    </div>
+  </div>
 
   <script>
     // ========== State ==========
@@ -1367,14 +1384,16 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return false;
     }
 
-    async function fetchPrevClose(symbol) {
+    async function fetchPrevClose(symbol, opts = {}) {
       const t = symbol.toUpperCase();
-      if (priceCache[t] && (Date.now() - (priceCache[t].fetchedAt || 0)) < 5 * 60 * 1000) {
+      const force = !!opts.force;
+      if (!force && priceCache[t] && (Date.now() - (priceCache[t].fetchedAt || 0)) < 5 * 60 * 1000) {
         return priceCache[t];
       }
       // Money markets / cash
       if (/^(VMFXX|SPAXX|FDRXX|SWVXX|FCASH|CASH)$/i.test(t)) {
-        const r = { price: 1, asOf: 'par', source: 'cash' };
+        const old = priceCache[t];
+        const r = { price: 1, asOf: 'par', source: 'cash', dayPrev: 1, refreshPrev: old?.price ?? 1, name: t };
         priceCache[t] = { ...r, fetchedAt: Date.now() };
         return r;
       }
@@ -1425,7 +1444,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
             asOf = asOf || 'prior close';
           }
           if (price == null || isNaN(price) || price <= 0) throw new Error('no price');
-          const r = { price: Number(price), asOf, source: 'yahoo' };
+          const prevFromBars = closes.length >= 2 ? closes[closes.length - 2] : (meta.chartPreviousClose || meta.previousClose || null);
+          const old = priceCache[t];
+          const r = {
+            price: Number(price),
+            asOf,
+            source: 'yahoo',
+            // vs prior trading day (Yahoo)
+            dayPrev: prevFromBars != null ? Number(prevFromBars) : null,
+            // vs last app refresh
+            refreshPrev: old && old.price != null ? old.price : (old && old.refreshPrev != null ? old.refreshPrev : null),
+            name: meta.longName || meta.shortName || t
+          };
           priceCache[t] = { ...r, fetchedAt: Date.now() };
           return r;
         } catch (e) {
@@ -1612,7 +1642,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
         while (queue.length) {
           const t = queue.shift();
           try {
-            const r = await fetchPrevClose(t);
+            const r = await fetchPrevClose(t, { force: true });
             if (r.asOf) asOfDates.add(r.asOf);
             holdings.forEach(p => {
               if (String(p.ticker || '').toUpperCase() !== t) return;
@@ -1855,29 +1885,111 @@ VTI,50,240.00,13250.00,Capital One Investing`
       }, 50);
     }
 
+    function priceCellHtml(ticker) {
+      const t = String(ticker || '').toUpperCase();
+      const pc = priceCache[t];
+      if (!pc || pc.price == null) {
+        return `<span class="text-slate-500 text-[11px]">—</span>`;
+      }
+      // Prefer change vs last refresh; fall back to day-over-day
+      const base = pc.refreshPrev != null ? pc.refreshPrev : pc.dayPrev;
+      let cls = 'text-slate-300';
+      let arrow = '';
+      if (base != null && base > 0) {
+        const ch = pc.price - base;
+        if (ch > 0.0001) { cls = 'text-emerald-400'; arrow = '▲'; }
+        else if (ch < -0.0001) { cls = 'text-rose-400'; arrow = '▼'; }
+      }
+      const px = pc.price >= 100 ? pc.price.toFixed(2) : (pc.price >= 1 ? pc.price.toFixed(2) : pc.price.toFixed(4));
+      return `<span class="${cls} text-[11px] font-medium">${arrow}$${px}</span>`;
+    }
+
+    function closeTickerModal() {
+      const modal = document.getElementById('tickerModal');
+      const frame = document.getElementById('tmFrame');
+      if (frame) frame.src = 'about:blank';
+      if (modal) modal.classList.add('hidden');
+    }
+
+    function openTickerModal(ticker, description) {
+      const t = String(ticker || '').toUpperCase().trim();
+      if (!t || t === 'HOME' || t === 'CASH' || t === 'UNKNOWN') return;
+      // Skip pure CUSIP-only if no yahoo symbol mapping
+      const yahooSym = (/^[A-Z]{1,5}$/.test(t) || /^[A-Z]{1,4}[A-Z0-9]{0,2}$/.test(t)) ? t
+        : (resolveFundKey(t, description) || t);
+      const pc = priceCache[yahooSym] || priceCache[t] || {};
+      const modal = document.getElementById('tickerModal');
+      const title = document.getElementById('tmTitle');
+      const sub = document.getElementById('tmSub');
+      const stats = document.getElementById('tmStats');
+      const frame = document.getElementById('tmFrame');
+      const openBtn = document.getElementById('tmOpenYahoo');
+      if (!modal) return;
+
+      const lab = displayLabel(t, description);
+      if (title) title.textContent = lab.primary || t;
+      if (sub) sub.textContent = (pc.name || lab.secondary || description || yahooSym || '').toString().slice(0, 80);
+
+      let chHtml = '';
+      if (pc.price != null) {
+        const base = pc.refreshPrev != null ? pc.refreshPrev : pc.dayPrev;
+        let chStr = '';
+        if (base != null && base > 0) {
+          const ch = pc.price - base;
+          const pct = (ch / base) * 100;
+          const col = ch > 0 ? 'text-emerald-400' : (ch < 0 ? 'text-rose-400' : 'text-slate-300');
+          chStr = `<span class="${col}">${ch >= 0 ? '+' : ''}${ch.toFixed(2)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)</span>`;
+        }
+        chHtml = `<div class="flex justify-between gap-2"><span>Last price</span><span class="font-medium">$${Number(pc.price).toFixed(2)} ${chStr}</span></div>
+                  <div class="flex justify-between gap-2 text-slate-500"><span>As of</span><span>${pc.asOf || '—'}</span></div>`;
+      } else {
+        chHtml = `<div class="text-slate-500">No refreshed price yet — tap Refresh prices on Overview.</div>`;
+      }
+      if (stats) stats.innerHTML = chHtml;
+
+      const yahooUrl = `https://finance.yahoo.com/quote/${encodeURIComponent(yahooSym)}`;
+      if (openBtn) {
+        openBtn.onclick = () => { window.open(yahooUrl, '_blank', 'noopener'); };
+      }
+      if (frame) {
+        // Nested Yahoo page (may be blank if Yahoo blocks framing — stats + Yahoo ↗ still work)
+        frame.src = yahooUrl;
+      }
+      modal.classList.remove('hidden');
+      const closeBtn = document.getElementById('tmClose');
+      if (closeBtn) closeBtn.onclick = closeTickerModal;
+      modal.onclick = (e) => { if (e.target === modal) closeTickerModal(); };
+    }
+
     function renderPositions() {
       const cons = consolidated();
       let html = `
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold mb-2">By Ticker (all accounts)</h3>
-          <div class="scroll-x max-h-64 overflow-y-auto">
+          <div class="scroll-x max-h-72 overflow-y-auto">
             <table class="w-full text-left">
               <thead><tr class="text-slate-400 text-xs">
                 <th class="py-1.5 pr-2">Ticker / Name</th>
+                <th class="py-1.5 pr-2 text-right">Price</th>
                 <th class="py-1.5 pr-2 text-right">Shares</th>
                 <th class="py-1.5 pr-2 text-right">Value</th>
-                <th class="py-1.5 text-right">#Accts</th>
+                <th class="py-1.5 text-right">#</th>
               </tr></thead>
               <tbody>
                 ${cons.map(c => {
                   const lab = displayLabel(c.ticker, c.description);
+                  const safeT = String(c.ticker || '').replace(/'/g, "\\'");
+                  const safeD = String(c.description || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
                   return `
-                  <tr class="border-t border-slate-700">
+                  <tr class="border-t border-slate-700 active:bg-slate-800/50">
                     <td class="py-1.5 pr-2 font-medium text-sky-300">
-                      ${lab.primary}
-                      ${lab.secondary ? `<div class="text-[10px] text-slate-400 font-normal truncate max-w-[160px]">${lab.secondary}</div>` : ''}
-                      ${c.fundKey ? `<div class="text-[10px] text-emerald-500/80 font-normal">→ ${c.fundKey}</div>` : ''}
+                      <button type="button" class="text-left w-full ticker-link" data-ticker="${safeT}" data-desc="${safeD}">
+                        <span class="underline decoration-slate-600 underline-offset-2">${lab.primary}</span>
+                        ${lab.secondary ? `<div class="text-[10px] text-slate-400 font-normal truncate max-w-[140px]">${lab.secondary}</div>` : ''}
+                        ${c.fundKey ? `<div class="text-[10px] text-emerald-500/80 font-normal">→ ${c.fundKey}</div>` : ''}
+                      </button>
                     </td>
+                    <td class="py-1.5 pr-2 text-right whitespace-nowrap">${priceCellHtml(c.ticker)}</td>
                     <td class="py-1.5 pr-2 text-right">${fmt(c.total_shares, 2)}</td>
                     <td class="py-1.5 pr-2 text-right">${fmtMoney(c.total_value)}</td>
                     <td class="py-1.5 text-right">${c.n_accounts}</td>
@@ -1886,6 +1998,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
               </tbody>
             </table>
           </div>
+          <p class="text-[10px] text-slate-500 mt-1.5">Price: last refresh (green ▲ / red ▼ vs prior refresh). Tap ticker for Yahoo details.</p>
         </div>
         <div class="card p-3">
           <h3 class="text-sm font-semibold mb-2">Individual Positions</h3>
@@ -1920,6 +2033,11 @@ VTI,50,240.00,13250.00,Capital One Investing`
         </div>
       `;
       $('#panel-positions').innerHTML = html;
+      $('#panel-positions').querySelectorAll('.ticker-link').forEach(btn => {
+        btn.addEventListener('click', () => {
+          openTickerModal(btn.getAttribute('data-ticker'), btn.getAttribute('data-desc'));
+        });
+      });
     }
 
     function renderOverlap() {
