@@ -5,8 +5,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Portfolio" />
   <meta name="theme-color" content="#0f172a" />
   <title>Portfolio Analyzer</title>
+  <link rel="apple-touch-icon" href="apple-touch-icon.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icon-192.png" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
   <!-- Local SheetJS first (same origin as GitHub Pages — avoids iPhone CDN blocks) -->
@@ -47,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v39</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v41</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -93,13 +97,29 @@
 
     <!-- Dashboard (hidden until data loaded) -->
     <section id="dashboard" class="hidden">
-      <!-- Source file filter -->
+      <!-- Source file filter + home valuation -->
       <div id="sourceFilter" class="mb-3 hidden">
         <div class="flex items-center justify-between mb-1.5">
           <span class="text-xs text-slate-400">Show files</span>
           <button id="btnAddFiles" class="text-xs text-sky-400 font-semibold">+ Add files</button>
         </div>
         <div id="sourceChips" class="flex flex-wrap gap-1.5"></div>
+        <div class="flex flex-wrap items-center gap-1.5 mt-2">
+          <button type="button" id="btnHomeToggle"
+            class="text-[11px] px-2.5 py-1.5 rounded-full border transition active:scale-95 bg-slate-800 border-slate-600 text-slate-500">
+            Home valuation
+          </button>
+          <button type="button" id="btnHomeManage" class="text-[11px] text-sky-400 font-semibold px-1">Manage properties</button>
+        </div>
+        <div id="homeManagePanel" class="hidden mt-2 card p-2.5 border border-emerald-800/40">
+          <p class="text-[11px] text-slate-400 mb-2">Add one or more addresses. Estimates try Redfin when you refresh or tap Lookup. You can also type a value.</p>
+          <div id="homePropList" class="space-y-2 mb-2"></div>
+          <div class="flex gap-1.5">
+            <input id="homeAddrInput" type="text" placeholder="Street, City, ST ZIP"
+              class="flex-1 bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-xs text-slate-200" />
+            <button type="button" id="btnHomeAdd" class="text-xs bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg px-2.5 py-1.5 shrink-0">Add</button>
+          </div>
+        </div>
       </div>
       <!-- Metrics -->
       <div class="grid grid-cols-2 gap-2 mb-3" id="metrics"></div>
@@ -165,16 +185,11 @@
     let priceCache = {}; // ticker -> { price, asOf, source, changePct, dayPrev, refreshPrev }
     let showPctChange = false; // Positions price column: $ vs % toggle
 
-    // Primary residence — Redfin estimate only (updated via Refresh prices)
-    let homeAsset = {
-      enabled: true,
-      address: '3903 Harlington Ln, Richardson, TX 75082',
-      value: 620253,
-      source: 'Redfin estimate',
-      beds: 5,
-      baths: 4,
-      sqft: 3211,
-      yearBuilt: 1997
+    // Real estate — user-managed properties (addresses + estimates)
+    // include: whether to fold into Overview net-worth / asset mix
+    let homeSettings = {
+      include: false,
+      properties: [] // { id, address, value, source, redfinUrl, refreshedAt }
     };
 
     // Kids' Baird accounts (529s / individual) — not part of Steve's portfolio
@@ -195,30 +210,39 @@
       return list.filter(p => activeSources.has(p.source_file || 'Unknown'));
     }
 
-    // Synthetic real-estate position for net-worth / asset-class views
-    function homePosition() {
-      if (!homeAsset || !homeAsset.enabled || !(homeAsset.value > 0)) return null;
-      return {
-        broker: 'Home',
-        account: 'Primary residence',
-        ticker: 'HOME',
-        description: homeAsset.address || 'Primary residence',
-        shares: 1,
-        last_price: homeAsset.value,
-        market_value: homeAsset.value,
-        cost_basis: null,
-        unrealized_gl: null,
-        asset_type: 'Real Estate',
-        source_file: 'Home (manual/estimate)',
-        is_home: true
-      };
+    function totalHomeValue() {
+      if (!homeSettings.include) return 0;
+      return (homeSettings.properties || []).reduce((s, p) => s + (Number(p.value) || 0), 0);
     }
 
-    // Investments + home (for Overview mix / total net-worth style metrics)
+    function homePositions() {
+      if (!homeSettings.include) return [];
+      return (homeSettings.properties || [])
+        .filter(p => (Number(p.value) || 0) > 0 || (p.address && p.address.trim()))
+        .map((p, i) => ({
+          broker: 'Home',
+          account: p.address || `Property ${i + 1}`,
+          ticker: 'HOME',
+          description: p.address || `Property ${i + 1}`,
+          shares: 1,
+          last_price: Number(p.value) || 0,
+          market_value: Number(p.value) || 0,
+          cost_basis: null,
+          unrealized_gl: null,
+          asset_type: 'Real Estate',
+          source_file: 'Home valuation',
+          is_home: true,
+          home_id: p.id
+        }));
+    }
+
+    // Investments + optional real estate (Overview mix / net-worth metrics)
     function viewHoldingsWithHome() {
-      const list = viewHoldings();
-      const h = homePosition();
-      return h ? list.concat([h]) : list;
+      return viewHoldings().concat(homePositions());
+    }
+
+    function saveHomeSettings() {
+      try { localStorage.setItem('portfolio_homes_v2', JSON.stringify(homeSettings)); } catch (_) {}
     }
 
     function allSourceFiles() {
@@ -1257,11 +1281,16 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const sources = allSourceFiles();
       const bar = $('#sourceFilter');
       const chips = $('#sourceChips');
-      if (!sources.length) {
-        bar.classList.add('hidden');
-        return;
+      // Keep bar visible when we have files OR user may manage homes
+      if (!sources.length && !(homeSettings.properties || []).length && !homeSettings.include) {
+        // Still show bar if dashboard is active so Home valuation is reachable after load
       }
       bar.classList.remove('hidden');
+      if (!sources.length) {
+        chips.innerHTML = '';
+        renderHomeControls();
+        return;
+      }
 
       // Initialize once; preserve user on/off toggles; only auto-enable truly new files
       if (!activeSources) {
@@ -1319,6 +1348,124 @@ VTI,50,240.00,13250.00,Capital One Investing`
         activeSources = new Set(); // empty is allowed
         renderAll();
       };
+
+      renderHomeControls();
+    }
+
+    function renderHomeControls() {
+      const btn = document.getElementById('btnHomeToggle');
+      const manage = document.getElementById('btnHomeManage');
+      const panel = document.getElementById('homeManagePanel');
+      const list = document.getElementById('homePropList');
+      if (!btn) return;
+
+      const n = (homeSettings.properties || []).length;
+      const total = totalHomeValue();
+      const on = !!homeSettings.include && n > 0;
+      btn.className = `text-[11px] px-2.5 py-1.5 rounded-full border transition active:scale-95 ${
+        on ? 'bg-emerald-700/50 border-emerald-400 text-emerald-100' : 'bg-slate-800 border-slate-600 text-slate-500'
+      }`;
+      btn.textContent = on
+        ? `✓ Home valuation${total ? ' · ' + fmtMoney(total) : ''}`
+        : (n ? `Home valuation (${n})` : 'Home valuation');
+
+      btn.onclick = () => {
+        if (!(homeSettings.properties || []).length) {
+          // Open manage panel to add first property
+          if (panel) panel.classList.remove('hidden');
+          toast('Add a property address first');
+          return;
+        }
+        homeSettings.include = !homeSettings.include;
+        saveHomeSettings();
+        renderAll();
+      };
+
+      if (manage) {
+        manage.onclick = () => {
+          if (!panel) return;
+          panel.classList.toggle('hidden');
+          if (!panel.classList.contains('hidden')) fillHomePropList();
+        };
+      }
+
+      const addBtn = document.getElementById('btnHomeAdd');
+      const addrInp = document.getElementById('homeAddrInput');
+      if (addBtn && addrInp) {
+        addBtn.onclick = async () => {
+          const addr = (addrInp.value || '').trim();
+          if (!addr) { toast('Enter an address'); return; }
+          const id = 'p' + Date.now();
+          homeSettings.properties.push({ id, address: addr, value: 0, source: 'pending', redfinUrl: '' });
+          addrInp.value = '';
+          saveHomeSettings();
+          fillHomePropList();
+          toast('Looking up estimate…');
+          await lookupPropertyEstimate(id);
+          if (homeSettings.properties.length === 1) homeSettings.include = true;
+          saveHomeSettings();
+          renderAll();
+        };
+      }
+      if (panel && !panel.classList.contains('hidden')) fillHomePropList();
+    }
+
+    function fillHomePropList() {
+      const list = document.getElementById('homePropList');
+      if (!list) return;
+      const props = homeSettings.properties || [];
+      if (!props.length) {
+        list.innerHTML = `<p class="text-[11px] text-slate-500">No properties yet.</p>`;
+        return;
+      }
+      list.innerHTML = props.map(p => `
+        <div class="bg-slate-800/70 rounded-lg p-2 border border-slate-700" data-home-id="${p.id}">
+          <div class="text-xs text-emerald-200 font-medium leading-snug">${p.address}</div>
+          <div class="flex items-center gap-1.5 mt-1.5">
+            <span class="text-[10px] text-slate-500">$</span>
+            <input type="number" class="home-val-input bg-slate-900 border border-slate-600 rounded px-1.5 py-0.5 text-xs text-emerald-200 w-28"
+              value="${p.value ? Math.round(p.value) : ''}" placeholder="estimate" />
+            <button type="button" class="home-lookup text-[10px] text-sky-400 px-1">Lookup</button>
+            <button type="button" class="home-remove text-[10px] text-rose-400 px-1">Remove</button>
+          </div>
+          <div class="text-[10px] text-slate-500 mt-0.5">${p.source || ''}${p.refreshedAt ? ' · ' + p.refreshedAt : ''}</div>
+        </div>
+      `).join('');
+
+      list.querySelectorAll('[data-home-id]').forEach(row => {
+        const id = row.getAttribute('data-home-id');
+        const prop = homeSettings.properties.find(x => x.id === id);
+        if (!prop) return;
+        const inp = row.querySelector('.home-val-input');
+        if (inp) {
+          inp.onchange = () => {
+            const v = parseFloat(inp.value);
+            if (!isNaN(v) && v >= 0) {
+              prop.value = v;
+              prop.source = prop.source && prop.source.includes('manual') ? prop.source : 'manual entry';
+              saveHomeSettings();
+              renderHomeControls();
+              renderAll();
+            }
+          };
+        }
+        const lu = row.querySelector('.home-lookup');
+        if (lu) lu.onclick = async () => {
+          toast('Looking up…');
+          await lookupPropertyEstimate(id);
+          saveHomeSettings();
+          fillHomePropList();
+          renderAll();
+        };
+        const rm = row.querySelector('.home-remove');
+        if (rm) rm.onclick = () => {
+          homeSettings.properties = homeSettings.properties.filter(x => x.id !== id);
+          if (!homeSettings.properties.length) homeSettings.include = false;
+          saveHomeSettings();
+          fillHomePropList();
+          renderAll();
+        };
+      });
     }
 
     function renderAll() {
@@ -1352,7 +1499,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
       $('#metrics').innerHTML = `
         <div class="metric"><div class="label">Investments</div><div class="value text-sky-300">${fmtMoney(totalVal)}</div></div>
-        <div class="metric"><div class="label">+ Home (est.)</div><div class="value text-emerald-300">${fmtMoney(homeAsset.enabled ? homeAsset.value : 0)}</div></div>
+        <div class="metric"><div class="label">+ Home (est.)</div><div class="value text-emerald-300">${fmtMoney(totalHomeValue())}</div></div>
         <div class="metric"><div class="label">Net-ish total</div><div class="value text-sky-200">${fmtMoney(totalWithHome)}</div></div>
         <div class="metric"><div class="label">Tickers / Accts</div><div class="value">${nTickers} / ${nAccts}</div></div>
       `;
@@ -1488,39 +1635,101 @@ VTI,50,240.00,13250.00,Capital One Investing`
       throw lastErr || new Error('fetch failed');
     }
 
-    async function fetchHomeEstimate() {
-      // Redfin public listing page for this address (estimate embedded in HTML/JSON)
-      const redfinUrl = 'https://www.redfin.com/TX/Richardson/3903-Harlington-Ln-75082/home/32240568';
+    function parseRedfinEstimate(html) {
+      if (!html || html.length < 400) return null;
+      let m =
+        html.match(/"predictedValue"\s*:\s*(\d+(?:\.\d+)?)/i) ||
+        html.match(/"avmValue"\s*:\s*(\d+(?:\.\d+)?)/i) ||
+        html.match(/"amount"\s*:\s*(\d{5,7})\s*,\s*"currencyCode"\s*:\s*"USD"/i) ||
+        html.match(/Redfin Estimate[^$]{0,40}\$([0-9]{3},[0-9]{3})/i) ||
+        html.match(/\$([0-9]{3},[0-9]{3})\s*(?:Redfin Estimate|estimate)/i) ||
+        html.match(/estimate[^$]{0,30}\$([0-9]{3},[0-9]{3})/i);
+      if (!m) return null;
+      const val = parseFloat(String(m[1]).replace(/,/g, ''));
+      if (val >= 50000 && val <= 20000000) return Math.round(val);
+      return null;
+    }
+
+    async function fetchViaProxies(targetUrl) {
       const urls = [
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(redfinUrl)}`,
-        `https://corsproxy.io/?${encodeURIComponent(redfinUrl)}`,
+        `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+        `https://corsproxy.io/?${encodeURIComponent(targetUrl)}`,
       ];
       for (const url of urls) {
         try {
           const res = await fetch(url, { cache: 'no-store' });
           if (!res.ok) continue;
-          const html = await res.text();
-          if (!html || html.length < 500) continue;
-          // Common patterns in Redfin pages
-          let m =
-            html.match(/"predictedValue"\s*:\s*(\d+(?:\.\d+)?)/i) ||
-            html.match(/"avmValue"\s*:\s*(\d+(?:\.\d+)?)/i) ||
-            html.match(/"amount"\s*:\s*(\d{5,7})\s*,\s*"currencyCode"\s*:\s*"USD"/i) ||
-            html.match(/Redfin Estimate[^$]{0,40}\$([0-9]{3},[0-9]{3})/i) ||
-            html.match(/\$([0-9]{3},[0-9]{3})\s*(?:Redfin Estimate|estimate)/i) ||
-            html.match(/estimate[^$]{0,30}\$([0-9]{3},[0-9]{3})/i);
-          if (m) {
-            const raw = String(m[1]).replace(/,/g, '');
-            const val = parseFloat(raw);
-            if (val >= 100000 && val <= 5000000) {
-              return { value: Math.round(val), source: 'Redfin estimate (live)', asOf: new Date().toLocaleDateString() };
-            }
-          }
-        } catch (e) {
-          console.warn('Home estimate fetch fail', e);
-        }
+          const text = await res.text();
+          if (text && text.length > 100) return text;
+        } catch (_) {}
       }
       return null;
+    }
+
+    async function resolveRedfinUrl(address) {
+      // Autocomplete → property URL
+      const auto = `https://www.redfin.com/stingray/do/location-autocomplete?location=${encodeURIComponent(address)}&v=2`;
+      const body = await fetchViaProxies(auto);
+      if (body) {
+        try {
+          const cleaned = body.replace(/^\{\}\&\&/, ''); // Redfin sometimes prefixes
+          const data = JSON.parse(cleaned);
+          const rows = data?.payload?.sections?.flatMap(s => s.rows || []) || data?.payload?.exactMatch || [];
+          const list = Array.isArray(rows) ? rows : (rows ? [rows] : []);
+          for (const row of list) {
+            const u = row.url || row.uid || row.letter;
+            if (u && String(u).includes('/home/')) {
+              return String(u).startsWith('http') ? u : `https://www.redfin.com${u}`;
+            }
+            if (row.url && /\/[A-Z]{2}\//.test(row.url)) {
+              return String(row.url).startsWith('http') ? row.url : `https://www.redfin.com${row.url}`;
+            }
+          }
+        } catch (_) {}
+        // Fallback: regex path in raw
+        const m = body.match(/\/[A-Z]{2}\/[A-Za-z0-9\-]+\/[A-Za-z0-9\-]+-\d{5}\/home\/\d+/);
+        if (m) return `https://www.redfin.com${m[0]}`;
+      }
+      return null;
+    }
+
+    async function lookupPropertyEstimate(propId) {
+      const prop = (homeSettings.properties || []).find(p => p.id === propId);
+      if (!prop || !prop.address) return null;
+      try {
+        let pageUrl = prop.redfinUrl;
+        if (!pageUrl) pageUrl = await resolveRedfinUrl(prop.address);
+        if (pageUrl) prop.redfinUrl = pageUrl;
+        if (!pageUrl) {
+          prop.source = 'lookup failed — enter value manually';
+          return null;
+        }
+        const html = await fetchViaProxies(pageUrl);
+        const val = parseRedfinEstimate(html || '');
+        if (val) {
+          prop.value = val;
+          prop.source = 'Redfin estimate';
+          prop.refreshedAt = new Date().toLocaleDateString();
+          return val;
+        }
+        prop.source = 'estimate not found — enter value manually';
+        return null;
+      } catch (e) {
+        prop.source = 'lookup error — enter value manually';
+        return null;
+      }
+    }
+
+    async function refreshAllHomeEstimates() {
+      if (!homeSettings.include && !(homeSettings.properties || []).length) return { msg: '' };
+      let n = 0;
+      for (const p of homeSettings.properties || []) {
+        if (!p.address) continue;
+        const v = await lookupPropertyEstimate(p.id);
+        if (v) n++;
+      }
+      saveHomeSettings();
+      return { msg: n ? ` · ${n} home estimate(s)` : ' · home estimates unavailable' };
     }
 
     function isAnnuityPosition(p) {
@@ -1656,11 +1865,12 @@ VTI,50,240.00,13250.00,Capital One Investing`
         data.map(yahooSymbolForPosition).filter(Boolean)
       )];
       const hasAnnuities = holdings.some(isAnnuityPosition);
-      if (!tickers.length && !(homeAsset && homeAsset.enabled) && !hasAnnuities) {
-        toast('Load positions or enable home first');
+      const homeOn = homeSettings.include && (homeSettings.properties || []).length;
+      if (!tickers.length && !homeOn && !hasAnnuities) {
+        toast('Load positions or enable Home valuation first');
         return;
       }
-      toast(`Refreshing${tickers.length ? ' ' + tickers.length + ' prices' : ''}${hasAnnuities ? ' + annuities' : ''}${homeAsset.enabled ? ' + home' : ''}…`);
+      toast(`Refreshing${tickers.length ? ' ' + tickers.length + ' prices' : ''}${hasAnnuities ? ' + annuities' : ''}${homeOn ? ' + home' : ''}…`);
       const btn = document.getElementById('btnRefreshPrices');
       if (btn) {
         btn.disabled = true;
@@ -1709,18 +1919,10 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
       let homeMsg = '';
       const homeJob = (async () => {
-        if (!homeAsset.enabled) return;
+        if (!homeSettings.include || !(homeSettings.properties || []).length) return;
         try {
-          const est = await fetchHomeEstimate();
-          if (est && est.value) {
-            homeAsset.value = est.value;
-            homeAsset.source = est.source;
-            homeAsset.refreshedAt = est.asOf;
-            try { localStorage.setItem('portfolio_home_v1', JSON.stringify(homeAsset)); } catch (_) {}
-            homeMsg = ` · home ${fmtMoney(est.value)}`;
-          } else {
-            homeMsg = ' · home estimate unavailable (kept prior)';
-          }
+          const r = await refreshAllHomeEstimates();
+          homeMsg = r.msg || '';
         } catch (e) {
           homeMsg = ' · home refresh failed';
         }
@@ -1766,7 +1968,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       let totalVal = 0;
       // Asset class + account mix include home for net-worth view
       viewHoldingsWithHome().forEach(p => {
-        const label = p.is_home ? 'Primary residence' : friendlyAccount(p.account, p.broker, p.source_file);
+        const label = p.is_home ? (p.description || 'Home') : friendlyAccount(p.account, p.broker, p.source_file);
         const val = p.market_value || 0;
         byAcct[label] = (byAcct[label] || 0) + val;
         const cls = p.is_home ? 'Real Estate' : classifyAsset(p);
@@ -1800,7 +2002,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const refreshInfo = lastPriceRefresh
         ? `Last refresh ${lastPriceRefresh.at.toLocaleString()} · ${lastPriceRefresh.updated} priced · as-of ${lastPriceRefresh.asOf}`
             + (lastPriceRefresh.failed ? ` · ${lastPriceRefresh.failed} failed` : '')
-        : 'Uses statement values until you refresh. Stocks/ETFs = prior close; annuities ≈ SPY-scaled; home = Redfin when available.';
+        : 'Uses statement values until you refresh. Stocks/ETFs = prior close; annuities ≈ SPY-scaled; homes = Redfin when enabled.';
 
       let html = `
         ${excludedNote}
@@ -2531,15 +2733,34 @@ VTI,50,240.00,13250.00,Capital One Investing`
         }
       } catch (e) {}
       try {
-        const h = localStorage.getItem('portfolio_home_v1');
-        if (h) {
-          const parsed = JSON.parse(h);
-          if (parsed && typeof parsed.value === 'number') {
-            homeAsset = Object.assign(homeAsset, parsed);
+        const h2 = localStorage.getItem('portfolio_homes_v2');
+        if (h2) {
+          const parsed = JSON.parse(h2);
+          if (parsed && Array.isArray(parsed.properties)) homeSettings = parsed;
+        } else {
+          // Migrate legacy single home if present
+          const h1 = localStorage.getItem('portfolio_home_v1');
+          if (h1) {
+            const old = JSON.parse(h1);
+            if (old && old.address) {
+              homeSettings = {
+                include: !!old.enabled,
+                properties: [{
+                  id: 'legacy1',
+                  address: old.address,
+                  value: Number(old.value) || 0,
+                  source: old.source || 'migrated',
+                  redfinUrl: '',
+                  refreshedAt: old.refreshedAt || ''
+                }]
+              };
+              saveHomeSettings();
+            }
           }
         }
       } catch (e) {}
-      if (holdings.length || (homeAsset && homeAsset.enabled)) renderAll();
+      if (holdings.length || (homeSettings.include && homeSettings.properties?.length)) renderAll();
+      else if (holdings.length) renderAll();
     }
 
     // ========== Events ==========
