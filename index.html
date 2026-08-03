@@ -47,7 +47,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v36</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v37</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -162,7 +162,8 @@
     let knownSources = new Set(); // all source names we've ever seen this session
     let currentTab = 'overview';
     let lastPriceRefresh = null; // { at: Date, updated: n, failed: n, asOf: string }
-    let priceCache = {}; // ticker -> { price, asOf, source }
+    let priceCache = {}; // ticker -> { price, asOf, source, changePct, dayPrev, refreshPrev }
+    let showPctChange = false; // Positions price column: $ vs % toggle
 
     // Primary residence — Redfin estimate only (updated via Refresh prices)
     let homeAsset = {
@@ -1444,17 +1445,35 @@ VTI,50,240.00,13250.00,Capital One Investing`
             // Only use as dayPrev if it's different from price
             if (cp != null && Math.abs(Number(cp) - Number(price)) > 0.0001) dayPrev = Number(cp);
           }
+          // Mutual funds often have better values on meta than daily bars
+          if (meta.instrumentType === 'MUTUALFUND' || /^[A-Z]{5}$/.test(t)) {
+            const mf = meta.regularMarketPrice ?? meta.previousClose;
+            if (mf != null && !isNaN(mf) && mf > 0) {
+              price = Number(mf);
+              const cp = meta.chartPreviousClose ?? meta.previousClose;
+              if (cp != null && Math.abs(Number(cp) - price) > 0.0001) dayPrev = Number(cp);
+            }
+          }
           if (price == null || isNaN(price) || price <= 0) throw new Error('no price');
           const old = priceCache[t];
-          // On forced refresh, previous refresh price is whatever we had stored
           const refreshPrev = (old && old.price != null) ? Number(old.price) : null;
+          const dayPrevN = dayPrev != null ? Number(dayPrev) : null;
+          let changePct = null;
+          const baseForPct = (refreshPrev != null && Math.abs(price - refreshPrev) > 0.00005)
+            ? refreshPrev
+            : dayPrevN;
+          if (baseForPct != null && baseForPct > 0) {
+            changePct = ((Number(price) - baseForPct) / baseForPct) * 100;
+          }
           const r = {
             price: Number(price),
             asOf,
             source: 'yahoo',
-            dayPrev: dayPrev != null ? Number(dayPrev) : null,
+            dayPrev: dayPrevN,
             refreshPrev,
-            name: meta.longName || meta.shortName || t
+            changePct,
+            name: meta.longName || meta.shortName || t,
+            instrumentType: meta.instrumentType || null
           };
           priceCache[t] = { ...r, fetchedAt: Date.now() };
           return r;
@@ -1617,10 +1636,20 @@ VTI,50,240.00,13250.00,Capital One Investing`
       };
     }
 
+    function yahooSymbolForPosition(p) {
+      const t = String(p.ticker || '').toUpperCase().trim();
+      if (isPricableTicker(t)) return t;
+      const fk = resolveFundKey(p.ticker, p.description);
+      if (fk && isPricableTicker(fk)) return fk;
+      if (fk && /^[A-Z]{2,5}$/.test(fk)) return fk;
+      return null;
+    }
+
     async function refreshMarketPrices() {
       const data = viewHoldings();
+      // Price real tickers AND mapped fund symbols (NON* → FXAIX/FBGRX etc.)
       const tickers = [...new Set(
-        data.map(p => String(p.ticker || '').toUpperCase().trim()).filter(isPricableTicker)
+        data.map(yahooSymbolForPosition).filter(Boolean)
       )];
       const hasAnnuities = holdings.some(isAnnuityPosition);
       if (!tickers.length && !(homeAsset && homeAsset.enabled) && !hasAnnuities) {
@@ -1644,8 +1673,13 @@ VTI,50,240.00,13250.00,Capital One Investing`
           try {
             const r = await fetchPrevClose(t, { force: true });
             if (r.asOf) asOfDates.add(r.asOf);
+            // Also mirror under any position ticker that maps to this yahoo symbol
             holdings.forEach(p => {
-              if (String(p.ticker || '').toUpperCase() !== t) return;
+              const yt = yahooSymbolForPosition(p);
+              const pt = String(p.ticker || '').toUpperCase();
+              if (yt !== t && pt !== t) return;
+              // Cache under position ticker so table lookup works
+              if (pt && pt !== t) priceCache[pt] = { ...r, fetchedAt: Date.now() };
               if (p.statement_value == null && p.market_value != null) {
                 p.statement_value = p.market_value;
               }
@@ -1896,22 +1930,37 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return null;
     }
 
-    function priceCellHtml(ticker) {
+    function lookupPrice(ticker, description) {
       const t = String(ticker || '').toUpperCase();
-      const pc = priceCache[t];
+      if (priceCache[t]?.price != null) return priceCache[t];
+      const fk = resolveFundKey(ticker, description);
+      if (fk && priceCache[fk]?.price != null) return priceCache[fk];
+      return priceCache[t] || null;
+    }
+
+    function priceCellHtml(ticker, description) {
+      const pc = lookupPrice(ticker, description);
       if (!pc || pc.price == null) {
-        return `<span class="text-slate-500 text-[11px]">—</span>`;
+        return `<button type="button" class="price-toggle text-slate-500 text-[11px]" disabled>—</button>`;
       }
       const base = priceChangeBase(pc);
+      let ch = null;
+      if (pc.changePct != null && !isNaN(pc.changePct)) ch = pc.changePct;
+      else if (base != null && base > 0) ch = ((pc.price - base) / base) * 100;
       let cls = 'text-slate-300';
-      let arrow = '';
-      if (base != null && base > 0) {
-        const ch = pc.price - base;
-        if (ch > 0.0001) { cls = 'text-emerald-400'; arrow = '▲'; }
-        else if (ch < -0.0001) { cls = 'text-rose-400'; arrow = '▼'; }
+      if (ch != null) {
+        if (ch > 0.0001) cls = 'text-emerald-400';
+        else if (ch < -0.0001) cls = 'text-rose-400';
       }
-      const px = pc.price >= 100 ? pc.price.toFixed(2) : (pc.price >= 1 ? pc.price.toFixed(2) : pc.price.toFixed(4));
-      return `<span class="${cls} text-[11px] font-medium">${arrow}$${px}</span>`;
+      let display;
+      if (showPctChange && ch != null) {
+        const sign = ch >= 0 ? '+' : '';
+        display = `${sign}${ch.toFixed(2)}%`;
+      } else {
+        const px = pc.price >= 100 ? pc.price.toFixed(2) : (pc.price >= 1 ? pc.price.toFixed(2) : pc.price.toFixed(4));
+        display = `$${px}`;
+      }
+      return `<button type="button" class="price-toggle ${cls} text-[11px] font-medium underline decoration-slate-600 underline-offset-2">${display}</button>`;
     }
 
     function openTickerOnYahoo(ticker, description) {
@@ -1955,7 +2004,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
                         ${c.fundKey ? `<div class="text-[10px] text-emerald-500/80 font-normal">→ ${c.fundKey}</div>` : ''}
                       </button>
                     </td>
-                    <td class="py-1.5 pr-2 text-right whitespace-nowrap">${priceCellHtml(c.ticker)}</td>
+                    <td class="py-1.5 pr-2 text-right whitespace-nowrap">${priceCellHtml(c.ticker, c.description)}</td>
                     <td class="py-1.5 pr-2 text-right">${fmt(c.total_shares, 2)}</td>
                     <td class="py-1.5 pr-2 text-right">${fmtMoney(c.total_value)}</td>
                     <td class="py-1.5 text-right">${c.n_accounts}</td>
@@ -1964,7 +2013,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
               </tbody>
             </table>
           </div>
-          <p class="text-[10px] text-slate-500 mt-1.5">Price: green ▲ / red ▼ vs prior session (or prior refresh). Tap ticker → Yahoo Finance.</p>
+          <p class="text-[10px] text-slate-500 mt-1.5">Tap price to switch $ ↔ %. Green/red = up/down vs prior session or refresh. Tap ticker → Yahoo Finance.</p>
         </div>
         <div class="card p-3">
           <h3 class="text-sm font-semibold mb-2">Individual Positions</h3>
@@ -2002,6 +2051,14 @@ VTI,50,240.00,13250.00,Capital One Investing`
       $('#panel-positions').querySelectorAll('.ticker-link').forEach(btn => {
         btn.addEventListener('click', () => {
           openTickerOnYahoo(btn.getAttribute('data-ticker'), btn.getAttribute('data-desc'));
+        });
+      });
+      $('#panel-positions').querySelectorAll('.price-toggle').forEach(btn => {
+        if (btn.disabled) return;
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showPctChange = !showPctChange;
+          renderPositions();
         });
       });
     }
