@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v45</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v46</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -299,6 +299,66 @@
         return 'Equities';
       if (a === 'OTHER') return 'Other';
       return 'Equities';
+    }
+
+    // Finer style / region mix for Overview (growth, large/small, int'l, bonds, etc.)
+    function classifyEquityStyle(p) {
+      if (p && p.is_home) return 'Real Estate';
+      const t = String(p.ticker || '').toUpperCase().trim();
+      const d = String(p.description || '').toUpperCase();
+      const blob = t + ' ' + d;
+      const fk = (typeof resolveFundKey === 'function' ? resolveFundKey(p.ticker, p.description) : '') || '';
+
+      // Non-equity buckets first
+      if (/CASH|SPAXX|FDRXX|VMFXX|SWVXX|FCASH|FDIC|MONEY MARKET|SWEEP/i.test(blob)) return 'Cash';
+      if (/ANNUITY|RILA|LEVEL ADVANTAGE|MARKET LINK|LVL ADVNTG|MKT LINK|JCKSN|LINCOLN/i.test(blob) ||
+          t === '53407L275' || t === '46849B384') return 'Annuities';
+      if (/^(BND|AGG|BNDX|TLT|IEF|IEI|SHY|GOVT|VCIT|VCSH|VTIP|SCHP|TIP|BIV|BSV|FXNAX|FBND)$/i.test(t) ||
+          ((/BOND|TREASURY|FIXED INCOME|MUNICIPAL|AGGREGATE|TIPS/i.test(blob)) && !/EQUITY|STOCK|GROWTH FUND|VALUE FUND/i.test(blob)))
+        return 'Bonds';
+      if (/MULTI-?ASSET|TARGET.?DATE|ALLOCATION|BALANCED|CIPAX|MAAGX/i.test(blob)) return 'Multi-Asset';
+      if (/^(GLD|IAU|SLV|USO|DBA|FTGC|PDBC|GSG)$/i.test(t) || /COMMODITY|GOLD|SILVER|OIL/i.test(blob)) return 'Commodities';
+      if (/^(VNQ|SCHH|IYR|XLRE)$/i.test(t) || (/REIT|REAL ESTATE/i.test(blob) && !/INTERNATIONAL/i.test(blob))) return 'REITs';
+      if (/^(GBTC|IBIT|FBTC|BITO|ETHE|ETHA)$/i.test(t) || /BITCOIN|ETHEREUM|CRYPTO/i.test(blob)) return 'Crypto';
+
+      // Known ticker maps (style)
+      const largeBlend = /^(VOO|SPY|IVV|SPLG|VTI|ITOT|SCHB|FXAIX|FNILX|FSKAX|FZROX|SWTSX|VFIAX|VTSAX)$/i;
+      const largeGrowth = /^(QQQ|QQQM|VUG|VGT|MGK|SCHG|IWF|VONG|FBGRX|FCNTX|FLCNX|FBGKX|ARKK|ARKW)$/i;
+      const largeValue = /^(VTV|IWD|SCHV|VLUE|DIA|DVY|VYM|SCHD)$/i;
+      const midCap = /^(IJH|VO|IWR|MDY|VIMAX|VMCPX|QQQJ)$/i;
+      const smallCap = /^(VB|IJR|IWM|SCHA|VTWO|VBIAX|VSMAX)$/i;
+      const intlDev = /^(VEA|IEFA|SCHF|EFA|VTMGX|FTIHX|FSPSX|VXUS|IXUS|VTIAX|VFIAX)$/i;
+      // VXUS/IXUS are total int'l — prefer Int'l total if those tickers
+      const intlTotal = /^(VXUS|IXUS|VTIAX|VXUS|ACWX)$/i;
+      const em = /^(VWO|IEMG|SCHE|EEM|FNDE|NEWFX|VWIGX)$/i;
+      const sector = /^(XLK|XLF|XLE|XLV|XLI|XLY|XLP|XLU|XLB|XLC|SMH|SOXX|XBI|ITA)$/i;
+
+      if (intlTotal.test(t) || fk === 'VXUS' || fk === 'IXUS') return 'Int\'l Total';
+      if (em.test(t) || /EMERGING/i.test(d)) return 'Emerging Mkts';
+      if (intlDev.test(t) || /INTERNATIONAL|DEVELOPED|EUROPE|PACIFIC|EAFE|FOREIGN|WORLD(?!.*US)/i.test(d)) {
+        if (/EMERGING/i.test(d)) return 'Emerging Mkts';
+        if (/WORLD|TOTAL INT/i.test(d)) return 'Int\'l Total';
+        return 'Int\'l Developed';
+      }
+      if (smallCap.test(t) || /SMALL.?CAP|RUSSELL 2000/i.test(d)) return 'US Small Cap';
+      if (midCap.test(t) || /MID.?CAP|MIDCAP|NEXT GEN/i.test(d)) return 'US Mid Cap';
+      if (largeGrowth.test(t) || fk === 'QQQ' || fk === 'QQQM' || fk === 'FBGRX' || fk === 'FLCNX' ||
+          (/GROWTH/i.test(d) && !/VALUE|BALANCED|ALLOCATION/i.test(d))) return 'US Large Growth';
+      if (largeValue.test(t) || (/VALUE/i.test(d) && !/GROWTH/i.test(d))) return 'US Large Value';
+      if (largeBlend.test(t) || fk === 'VOO' || fk === 'VTI' || fk === 'FXAIX' ||
+          /S&P 500|500 INDEX|TOTAL STOCK|TOTAL MARKET|LARGE.?CAP BLEND|DOW JONES/i.test(d)) return 'US Large Blend';
+      if (sector.test(t) || /SECTOR|TECHNOLOGY SELECT|ENERGY SELECT|FINANCIAL SELECT/i.test(d)) return 'US Sector';
+
+      // Single stocks — rough bucket by well-known names
+      if (/^(AAPL|MSFT|NVDA|AMZN|GOOGL|GOOG|META|AVGO|TSLA|NFLX|AMD|CRM|ADBE|ORCL|INTC|CSCO)$/i.test(t))
+        return 'US Large Growth';
+      if (/^(JPM|XOM|CVX|JNJ|PG|KO|WMT|UNH|BRK.B|BRKB|HD|MCD|VZ|PFE|MRK)$/i.test(t))
+        return 'US Large Value';
+      if (/^[A-Z]{1,5}$/.test(t) && !/CASH/i.test(t)) return 'US Individual / Other';
+
+      const top = classifyAsset(p);
+      if (top === 'Equities') return 'US Equity (other)';
+      return top;
     }
 
     function friendlyAccount(account, broker, sourceFile) {
@@ -2036,14 +2096,17 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const cons = consolidated().slice(0, 12);
       const byAcct = {};
       const byClass = {};
+      const byStyle = {};
       let totalVal = 0;
-      // Asset class + account mix include home for net-worth view
+      // Asset class + style + account mix include home for net-worth view
       viewHoldingsWithHome().forEach(p => {
         const label = p.is_home ? (p.description || 'Home') : friendlyAccount(p.account, p.broker, p.source_file);
         const val = p.market_value || 0;
         byAcct[label] = (byAcct[label] || 0) + val;
         const cls = p.is_home ? 'Real Estate' : classifyAsset(p);
         byClass[cls] = (byClass[cls] || 0) + val;
+        const style = classifyEquityStyle(p);
+        byStyle[style] = (byStyle[style] || 0) + val;
         totalVal += val;
       });
       const acctLabels = Object.keys(byAcct);
@@ -2053,6 +2116,16 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const classLabels = classOrder.filter(c => (byClass[c] || 0) > 0)
         .concat(Object.keys(byClass).filter(c => !classOrder.includes(c) && byClass[c] > 0));
       const classVals = classLabels.map(c => byClass[c]);
+      // Equity / style mix order
+      const styleOrder = [
+        'US Large Blend', 'US Large Growth', 'US Large Value', 'US Mid Cap', 'US Small Cap',
+        'US Sector', 'US Individual / Other', 'US Equity (other)',
+        'Int\'l Total', 'Int\'l Developed', 'Emerging Mkts',
+        'Bonds', 'Multi-Asset', 'Annuities', 'REITs', 'Commodities', 'Crypto', 'Cash', 'Real Estate', 'Other'
+      ];
+      const styleLabels = styleOrder.filter(c => (byStyle[c] || 0) > 0)
+        .concat(Object.keys(byStyle).filter(c => !styleOrder.includes(c) && byStyle[c] > 0));
+      const styleVals = styleLabels.map(c => byStyle[c]);
 
       const excludedRows = holdings.filter(p => isExcludedAccount(p.account));
       const excludedVal = excludedRows.reduce((s, p) => s + (p.market_value || 0), 0);
@@ -2094,6 +2167,21 @@ VTI,50,240.00,13250.00,Capital One Investing`
           <div class="mt-2 space-y-1">
             ${classLabels.map(c => {
               const v = byClass[c] || 0;
+              const pct = totalVal ? (v / totalVal) * 100 : 0;
+              return `<div class="flex justify-between text-xs">
+                <span class="text-slate-300">${c}</span>
+                <span class="text-slate-400">${fmtMoney(v)} <span class="text-sky-400">(${fmt(pct, 1)}%)</span></span>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold mb-1 text-slate-300">Equity & style mix</h3>
+          <p class="text-[10px] text-slate-500 mb-2">Large / growth / value / small / international / bonds and other sleeves (by ticker & description).</p>
+          <div id="chartStyle" style="height:260px"></div>
+          <div class="mt-2 space-y-1">
+            ${styleLabels.map(c => {
+              const v = byStyle[c] || 0;
               const pct = totalVal ? (v / totalVal) * 100 : 0;
               return `<div class="flex justify-between text-xs">
                 <span class="text-slate-300">${c}</span>
@@ -2165,6 +2253,22 @@ VTI,50,240.00,13250.00,Capital One Investing`
             paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
             font: { color: '#94a3b8', size: 11 },
             showlegend: true, legend: { orientation: 'h', y: -0.12 }
+          }, { responsive: true, displayModeBar: false });
+        }
+        if (styleLabels.length) {
+          Plotly.newPlot('chartStyle', [{
+            values: styleVals, labels: styleLabels, type: 'pie',
+            hole: 0.42, textinfo: 'percent',
+            marker: { colors: [
+              '#0ea5e9','#38bdf8','#0284c7','#818cf8','#a78bfa',
+              '#c084fc','#e879f9','#f472b6','#34d399','#4ade80',
+              '#fbbf24','#fb923c','#f87171','#94a3b8','#64748b','#22d3ee'
+            ] }
+          }], {
+            margin: { t: 10, b: 10, l: 10, r: 10 },
+            paper_bgcolor: 'transparent', plot_bgcolor: 'transparent',
+            font: { color: '#94a3b8', size: 10 },
+            showlegend: true, legend: { orientation: 'h', y: -0.15, font: { size: 10 } }
           }, { responsive: true, displayModeBar: false });
         }
         if (acctLabels.length) {
