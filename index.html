@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v44</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v45</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -134,29 +134,21 @@
         <button class="tab-btn active" data-tab="overview">Overview</button>
         <button class="tab-btn" data-tab="positions">Positions</button>
         <button class="tab-btn" data-tab="overlap">Look-thru</button>
-        <button class="tab-btn" data-tab="tlh">Tax Loss</button>
+        <button class="tab-btn" data-tab="optimize">Optimize</button>
       </div>
 
       <!-- Tab panels -->
       <div id="panel-overview" class="tab-panel"></div>
       <div id="panel-positions" class="tab-panel hidden"></div>
       <div id="panel-overlap" class="tab-panel hidden"></div>
-      <div id="panel-tlh" class="tab-panel hidden"></div>
+      <div id="panel-optimize" class="tab-panel hidden"></div>
     </section>
   </main>
 
   <!-- Bottom settings bar -->
   <div class="fixed bottom-0 left-0 right-0 bg-slate-900/95 backdrop-blur border-t border-slate-700 px-4 py-2 safe-bottom z-40">
     <div class="max-w-lg mx-auto flex items-center gap-3 text-xs">
-      <label class="flex items-center gap-1.5 text-slate-400">
-        Tax rate
-        <input type="number" id="taxRate" value="37" min="0" max="50" step="1" class="w-12 bg-slate-800 border border-slate-600 rounded px-1.5 py-1 text-center text-sky-300" />
-        %
-      </label>
-      <label class="flex items-center gap-1.5 text-slate-400">
-        Min loss $
-        <input type="number" id="minLoss" value="100" min="0" step="50" class="w-16 bg-slate-800 border border-slate-600 rounded px-1.5 py-1 text-center text-sky-300" />
-      </label>
+      <span class="text-slate-500">Local · private analysis</span>
       <button id="btnExport" class="ml-auto text-sky-400 font-semibold hidden">Export CSV</button>
     </div>
   </div>
@@ -1268,17 +1260,183 @@ VTI,50,240.00,13250.00,Capital One Investing`
         .sort((a, b) => b.total_value - a.total_value);
     }
 
-    function tlhCandidates() {
-      const rate = (parseFloat($('#taxRate').value) || 37) / 100;
-      const minL = parseFloat($('#minLoss').value) || 100;
-      return viewHoldings()
-        .filter(p => p.unrealized_gl != null && p.unrealized_gl < -Math.abs(minL))
-        .map(p => ({
-          ...p,
-          est_savings: -p.unrealized_gl * rate,
-          loss_pct: p.cost_basis ? (p.unrealized_gl / p.cost_basis) * 100 : null
-        }))
-        .sort((a, b) => a.unrealized_gl - b.unrealized_gl);
+    // Optimization knowledge base: typical expense ratios, risk, and lower-cost / cleaner peers.
+    // Illustrative only — not personalized advice. ER/risk are approximate industry norms.
+    const OPTIMIZE_DB = {
+      // US large-cap blend / S&P 500
+      VOO:  { name: 'Vanguard S&P 500', er: 0.03, risk: 'Moderate', role: 'US large blend', keep: true, alts: [] },
+      IVV:  { name: 'iShares Core S&P 500', er: 0.03, risk: 'Moderate', role: 'US large blend', keep: true, alts: [{ t: 'VOO', why: 'Same S&P 500 exposure, similarly ultra-low cost.' }] },
+      SPY:  { name: 'SPDR S&P 500', er: 0.09, risk: 'Moderate', role: 'US large blend', keep: false, alts: [{ t: 'VOO', why: 'Same index, ~3× lower expense ratio — better long-term drag.' }, { t: 'IVV', why: 'Same S&P 500, lower ER than SPY.' }] },
+      SPLG: { name: 'SPDR Portfolio S&P 500', er: 0.02, risk: 'Moderate', role: 'US large blend', keep: true, alts: [{ t: 'VOO', why: 'Very similar; either is a fine core holding.' }] },
+      FXAIX:{ name: 'Fidelity 500 Index', er: 0.015, risk: 'Moderate', role: 'US large blend', keep: true, alts: [] },
+      FNILX:{ name: 'Fidelity ZERO Large Cap', er: 0.00, risk: 'Moderate', role: 'US large blend', keep: true, alts: [] },
+      // Total US market
+      VTI:  { name: 'Vanguard Total Stock Market', er: 0.03, risk: 'Moderate', role: 'US total market', keep: true, alts: [] },
+      ITOT: { name: 'iShares Core S&P Total US', er: 0.03, risk: 'Moderate', role: 'US total market', keep: true, alts: [{ t: 'VTI', why: 'Near-identical total-market exposure.' }] },
+      FSKAX:{ name: 'Fidelity Total Market', er: 0.015, risk: 'Moderate', role: 'US total market', keep: true, alts: [] },
+      FZROX:{ name: 'Fidelity ZERO Total Market', er: 0.00, risk: 'Moderate', role: 'US total market', keep: true, alts: [] },
+      // Growth / NASDAQ
+      QQQ:  { name: 'Invesco QQQ', er: 0.20, risk: 'Aggressive', role: 'US large growth / NASDAQ-100', keep: false, alts: [{ t: 'QQQM', why: 'Same NASDAQ-100, roughly half the expense ratio.' }, { t: 'VGT', why: 'Broad tech sector ETF, lower ER, slightly different mix.' }] },
+      QQQM: { name: 'Invesco NASDAQ 100', er: 0.15, risk: 'Aggressive', role: 'US large growth / NASDAQ-100', keep: true, alts: [{ t: 'VUG', why: 'Broader large-growth factor, lower single-name concentration than pure NDX.' }] },
+      QQQJ: { name: 'Invesco NASDAQ Next Gen 100', er: 0.15, risk: 'Aggressive', role: 'US mid growth', keep: true, alts: [{ t: 'IJH', why: 'Broader mid-cap blend if you want less speculative growth tilt.' }, { t: 'VB', why: 'Small/mid blend alternative for size diversification.' }] },
+      VUG:  { name: 'Vanguard Growth', er: 0.04, risk: 'Aggressive', role: 'US large growth', keep: true, alts: [] },
+      VGT:  { name: 'Vanguard Information Technology', er: 0.09, risk: 'Aggressive', role: 'US tech sector', keep: true, alts: [{ t: 'XLK', why: 'Similar tech sector; compare holdings before switching.' }] },
+      FBGRX:{ name: 'Fidelity Blue Chip Growth', er: 0.61, risk: 'Aggressive', role: 'Active US growth', keep: false, alts: [{ t: 'VUG', why: 'Passive large-growth at a fraction of the fee; historically hard for active to beat after costs.' }, { t: 'QQQM', why: 'NASDAQ-100 growth tilt, much lower ER.' }] },
+      FCNTX:{ name: 'Fidelity Contrafund', er: 0.39, risk: 'Aggressive', role: 'Active US large growth', keep: false, alts: [{ t: 'VUG', why: 'Lower-cost passive growth proxy.' }, { t: 'VOO', why: 'If you want core beta instead of active stock-picking risk.' }] },
+      FLCNX:{ name: 'Fidelity Contrafund K6', er: 0.45, risk: 'Aggressive', role: 'Active US large growth', keep: false, alts: [{ t: 'VUG', why: 'Similar growth style, far lower ongoing cost.' }] },
+      // Dow / value tilt
+      DIA:  { name: 'SPDR Dow Jones Industrial Average', er: 0.16, risk: 'Moderate', role: 'US large value-ish (price-weighted)', keep: false, alts: [{ t: 'VTV', why: 'True large-value factor, market-cap weighted, lower ER.' }, { t: 'VOO', why: 'If DIA is redundant next to S&P 500 exposure you already hold.' }] },
+      VTV:  { name: 'Vanguard Value', er: 0.04, risk: 'Moderate', role: 'US large value', keep: true, alts: [] },
+      // Small cap
+      IWM:  { name: 'iShares Russell 2000', er: 0.19, risk: 'Aggressive', role: 'US small blend', keep: false, alts: [{ t: 'VB', why: 'Lower ER, broad US small-cap.' }, { t: 'IJR', why: 'S&P SmallCap 600 often cited for quality screen vs Russell 2000.' }] },
+      VB:   { name: 'Vanguard Small-Cap', er: 0.05, risk: 'Aggressive', role: 'US small blend', keep: true, alts: [] },
+      IJR:  { name: 'iShares Core S&P Small-Cap', er: 0.06, risk: 'Aggressive', role: 'US small blend', keep: true, alts: [] },
+      // International
+      VXUS: { name: 'Vanguard Total International', er: 0.05, risk: 'Moderate', role: 'Int’l equity', keep: true, alts: [] },
+      IXUS: { name: 'iShares Core Total Int’l', er: 0.07, risk: 'Moderate', role: 'Int’l equity', keep: true, alts: [{ t: 'VXUS', why: 'Nearly the same global ex-US exposure, slightly lower ER.' }] },
+      VEA:  { name: 'Vanguard FTSE Developed Markets', er: 0.03, risk: 'Moderate', role: 'Int’l developed', keep: true, alts: [] },
+      VWO:  { name: 'Vanguard FTSE Emerging Markets', er: 0.07, risk: 'Aggressive', role: 'Emerging markets', keep: true, alts: [] },
+      FSPSX:{ name: 'Fidelity International Index', er: 0.035, risk: 'Moderate', role: 'Int’l developed', keep: true, alts: [{ t: 'VEA', why: 'Similar developed-markets role if you prefer ETF share class.' }] },
+      NEWFX:{ name: 'American Funds New World', er: 0.96, risk: 'Aggressive', role: 'Active EM / global', keep: false, alts: [{ t: 'VWO', why: 'Passive EM at a fraction of the fee.' }, { t: 'VXUS', why: 'Broader international if New World is your only non-US sleeve.' }] },
+      AEPGX:{ name: 'American Funds Europacific Growth', er: 0.84, risk: 'Moderate-Aggressive', role: 'Active int’l', keep: false, alts: [{ t: 'VEA', why: 'Developed-markets beta, much lower cost.' }, { t: 'VXUS', why: 'Total international including EM.' }] },
+      // Bonds
+      BND:  { name: 'Vanguard Total Bond Market', er: 0.03, risk: 'Conservative', role: 'US core bonds', keep: true, alts: [] },
+      AGG:  { name: 'iShares Core US Aggregate Bond', er: 0.03, risk: 'Conservative', role: 'US core bonds', keep: true, alts: [{ t: 'BND', why: 'Same aggregate-bond role.' }] },
+      BNDX: { name: 'Vanguard Total International Bond', er: 0.07, risk: 'Conservative', role: 'Int’l bonds (hedged)', keep: true, alts: [] },
+      TLT:  { name: 'iShares 20+ Year Treasury', er: 0.15, risk: 'Moderate', role: 'Long-duration Treasuries', keep: true, alts: [{ t: 'VGLT', why: 'Similar long Treasury exposure, check ER and liquidity.' }] },
+      // Sector / thematic / speculative
+      ARKK: { name: 'ARK Innovation', er: 0.75, risk: 'Speculative', role: 'Active thematic growth', keep: false, alts: [{ t: 'VGT', why: 'Lower-cost tech if growth is the goal without single-manager risk.' }, { t: 'QQQM', why: 'Broad growth/tech beta with lower fees and turnover.' }] },
+      GBTC: { name: 'Grayscale Bitcoin Trust', er: 1.50, risk: 'Speculative', role: 'Bitcoin proxy', keep: false, alts: [{ t: 'IBIT', why: 'Spot Bitcoin ETF with much lower fee and tighter tracking.' }, { t: 'FBTC', why: 'Another low-cost spot Bitcoin ETF alternative.' }] },
+      // Cash
+      VMFXX:{ name: 'Vanguard Federal Money Market', er: 0.11, risk: 'Conservative', role: 'Cash / MM', keep: true, alts: [] },
+      SPAXX:{ name: 'Fidelity Government Money Market', er: 0.42, risk: 'Conservative', role: 'Cash / MM', keep: true, alts: [] },
+    };
+
+    function researchLinks(ticker) {
+      const t = encodeURIComponent(ticker);
+      return {
+        yahoo: `https://finance.yahoo.com/quote/${t}`,
+        morningstar: `https://www.morningstar.com/search?query=${t}`,
+        etf: `https://www.etf.com/${t}`,
+      };
+    }
+
+    function riskBadgeClass(risk) {
+      const r = String(risk || '').toLowerCase();
+      if (r.includes('specul')) return 'text-rose-300 bg-rose-900/40 border-rose-700/50';
+      if (r.includes('aggress')) return 'text-amber-300 bg-amber-900/40 border-amber-700/50';
+      if (r.includes('conserv')) return 'text-emerald-300 bg-emerald-900/40 border-emerald-700/50';
+      return 'text-sky-300 bg-sky-900/40 border-sky-700/50';
+    }
+
+    function optimizeKeyForPosition(p) {
+      const t = String(p.ticker || '').toUpperCase().trim();
+      if (OPTIMIZE_DB[t]) return t;
+      const fk = resolveFundKey(p.ticker, p.description);
+      if (fk && OPTIMIZE_DB[fk]) return fk;
+      return t;
+    }
+
+    function adviceForPosition(p) {
+      const key = optimizeKeyForPosition(p);
+      const lab = displayLabel(p.ticker, p.description);
+      const db = OPTIMIZE_DB[key];
+      const links = researchLinks(key && key.length <= 6 ? key : (lab.primary || p.ticker));
+      const assetClass = classifyAsset(p);
+
+      if (p.is_home || key === 'HOME') {
+        return null; // skip real estate synthetic rows
+      }
+      if (/CASH|ACCRUED/i.test(key) && !db) {
+        return {
+          ticker: key,
+          label: lab.primary,
+          value: p.market_value || 0,
+          risk: 'Conservative',
+          role: 'Cash',
+          status: 'ok',
+          summary: 'Cash / sweep balances are fine for liquidity; not an investment sleeve to “optimize” for return.',
+          alts: [],
+          links,
+          assetClass
+        };
+      }
+
+      if (db) {
+        const status = db.keep ? 'ok' : 'review';
+        const summary = db.keep
+          ? `Solid ${db.role} holding (approx. ER ${db.er}%). Risk: ${db.risk}.`
+          : `Consider upgrading this ${db.role} position (approx. ER ${db.er}%). Risk: ${db.risk}.`;
+        return {
+          ticker: key,
+          label: lab.primary,
+          sublabel: lab.secondary || db.name,
+          value: p.market_value || 0,
+          risk: db.risk,
+          role: db.role,
+          er: db.er,
+          status,
+          summary,
+          alts: db.alts || [],
+          links,
+          assetClass
+        };
+      }
+
+      // Heuristics for unknown tickers
+      const d = String(p.description || '');
+      let risk = 'Moderate', role = assetClass, status = 'unknown', summary = '', alts = [];
+      if (/ANNUITY|RILA|LEVEL ADVANTAGE|MARKET LINK/i.test(d + key)) {
+        risk = 'Moderate'; role = 'Index-linked annuity';
+        summary = 'Annuities are insurance products — optimization is about contract features, fees, and guarantees, not ticker swaps. Review surrender charges with your advisor.';
+        status = 'review';
+      } else if (/BOND|TREASURY|FIXED INCOME|AGGREGATE/i.test(d)) {
+        risk = 'Conservative'; role = 'Fixed income';
+        summary = 'Bond holding without a mapped peer. Compare expense ratio and duration to BND or AGG.';
+        alts = [{ t: 'BND', why: 'Low-cost total US bond market baseline.' }];
+        status = 'review';
+      } else if (/INTERNATIONAL|WORLD|EUROPE|EMERGING|FOREIGN/i.test(d)) {
+        risk = 'Moderate-Aggressive'; role = 'International equity';
+        summary = 'International equity sleeve — prefer a low-cost total-international index unless you need a specific region.';
+        alts = [{ t: 'VXUS', why: 'Broad, low-cost total international equity.' }];
+        status = 'review';
+      } else if (/GROWTH/i.test(d)) {
+        risk = 'Aggressive'; role = 'Growth equity';
+        summary = 'Growth-style fund. If fees are high, a passive growth ETF often wins after costs over long periods.';
+        alts = [{ t: 'VUG', why: 'Low-cost US large-growth index ETF.' }];
+        status = 'review';
+      } else {
+        summary = 'No built-in peer map for this symbol. Use the research links to compare expense ratio, risk, and overlap with the rest of your portfolio.';
+        status = 'unknown';
+      }
+      return {
+        ticker: key,
+        label: lab.primary,
+        sublabel: lab.secondary,
+        value: p.market_value || 0,
+        risk, role, status, summary, alts, links, assetClass
+      };
+    }
+
+    function optimizeRows() {
+      // One row per ticker (consolidated) within current file filter
+      const by = {};
+      viewHoldings().forEach(p => {
+        if (p.is_home) return;
+        const key = optimizeKeyForPosition(p) || String(p.ticker || 'UNKNOWN');
+        if (!by[key]) by[key] = { ...p, market_value: 0, _sample: p };
+        by[key].market_value += p.market_value || 0;
+        by[key]._sample = p;
+      });
+      return Object.values(by)
+        .map(row => adviceForPosition(row._sample ? { ...row._sample, market_value: row.market_value } : row))
+        .filter(Boolean)
+        .sort((a, b) => {
+          const rank = { review: 0, unknown: 1, ok: 2 };
+          const d = (rank[a.status] ?? 9) - (rank[b.status] ?? 9);
+          if (d !== 0) return d;
+          return (b.value || 0) - (a.value || 0);
+        });
     }
 
     // ========== Render ==========
@@ -1513,7 +1671,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
         $('#panel-overview').innerHTML = `<div class="card p-4 text-center text-slate-400 text-sm">No files selected. Tap a file chip above to show positions.</div>`;
         $('#panel-positions').innerHTML = '';
         $('#panel-overlap').innerHTML = '';
-        $('#panel-tlh').innerHTML = '';
+        $('#panel-optimize').innerHTML = '';
         showTab(currentTab);
         return;
       }
@@ -1521,7 +1679,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       renderOverview();
       renderPositions();
       renderOverlap();
-      renderTLH();
+      renderOptimize();
       showTab(currentTab);
     }
 
@@ -2567,59 +2725,82 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return { summary, detailHtml, hhi, level };
     }
 
-    function renderTLH() {
-      const cands = tlhCandidates();
+    function renderOptimize() {
+      const rows = optimizeRows();
+      const reviewN = rows.filter(r => r.status === 'review').length;
+      const okN = rows.filter(r => r.status === 'ok').length;
       let html = `
-        <div class="card p-3 mb-3 text-xs text-slate-400">
-          Positions with unrealized losses. Estimates use the tax rate in the bottom bar.
-          <strong class="text-slate-300">Not tax advice</strong> — confirm with your CPA. Watch the 30-day wash-sale rule.
+        <div class="card p-3 mb-3 text-xs text-slate-400 leading-relaxed">
+          Compares each holding in the <strong class="text-slate-300">selected files</strong> to common lower-cost or cleaner peers
+          by role and risk. Expense ratios and “better option” notes are <strong class="text-slate-300">illustrative norms</strong>, not live quotes
+          or a personalized plan.
+          <span class="text-amber-300/90">Not investment advice</span> — verify fees, tax lots, and fit before trading.
+        </div>
+        <div class="grid grid-cols-2 gap-2 mb-3">
+          <div class="metric"><div class="label">Review suggested</div><div class="value text-amber-300">${reviewN}</div></div>
+          <div class="metric"><div class="label">Looks solid</div><div class="value text-emerald-300">${okN}</div></div>
         </div>
       `;
-      if (!cands.length) {
-        html += `<div class="card p-4 text-center text-slate-400 text-sm">No losses above the minimum threshold found.</div>`;
-      } else {
-        const totalLoss = -cands.reduce((s,c) => s + c.unrealized_gl, 0);
-        const totalSave = cands.reduce((s,c) => s + c.est_savings, 0);
-        html += `
-          <div class="grid grid-cols-2 gap-2 mb-3">
-            <div class="metric"><div class="label">Harvestable</div><div class="value loss">${fmtMoney(totalLoss)}</div></div>
-            <div class="metric"><div class="label">Est. Tax Savings</div><div class="value text-amber-300">${fmtMoney(totalSave)}</div></div>
-          </div>
-          <div class="card p-3 mb-3">
-            <div class="scroll-x max-h-72 overflow-y-auto">
-              <table class="w-full text-left">
-                <thead><tr class="text-slate-400 text-xs">
-                  <th class="py-1.5 pr-2">Ticker</th>
-                  <th class="py-1.5 pr-2">Account</th>
-                  <th class="py-1.5 pr-2 text-right">Loss</th>
-                  <th class="py-1.5 text-right">Save≈</th>
-                </tr></thead>
-                <tbody>
-                  ${cands.map(c => `
-                    <tr class="border-t border-slate-700">
-                      <td class="py-1.5 pr-2 font-medium text-sky-300">${c.ticker}</td>
-                      <td class="py-1.5 pr-2 text-xs text-slate-400 truncate max-w-[80px]">${c.account}</td>
-                      <td class="py-1.5 pr-2 text-right loss">${fmtMoney(c.unrealized_gl)}</td>
-                      <td class="py-1.5 text-right text-amber-300">${fmtMoney(c.est_savings)}</td>
-                    </tr>`).join('')}
-                </tbody>
-              </table>
+      if (!rows.length) {
+        html += `<div class="card p-4 text-center text-slate-400 text-sm">No positions in the current filter.</div>`;
+        $('#panel-optimize').innerHTML = html;
+        return;
+      }
+
+      html += rows.map(r => {
+        const badge = riskBadgeClass(r.risk);
+        const statusLabel = r.status === 'ok' ? 'Keep / fine' : (r.status === 'review' ? 'Consider change' : 'Research');
+        const statusCls = r.status === 'ok' ? 'text-emerald-400' : (r.status === 'review' ? 'text-amber-300' : 'text-slate-400');
+        const altHtml = (r.alts && r.alts.length)
+          ? `<div class="mt-2 space-y-1.5">
+              <div class="text-[10px] uppercase tracking-wide text-slate-500">Possible alternatives</div>
+              ${r.alts.map(a => `
+                <div class="bg-slate-800/70 rounded-lg px-2.5 py-2 border border-slate-700">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="font-semibold text-sky-300">${a.t}</span>
+                    <span class="flex gap-2 text-[10px]">
+                      <a class="text-sky-400 underline" target="_blank" rel="noopener" href="https://finance.yahoo.com/quote/${encodeURIComponent(a.t)}">Yahoo</a>
+                      <a class="text-sky-400 underline" target="_blank" rel="noopener" href="https://www.morningstar.com/search?query=${encodeURIComponent(a.t)}">Morningstar</a>
+                    </span>
+                  </div>
+                  <p class="text-[11px] text-slate-400 mt-0.5 leading-snug">${a.why}</p>
+                </div>
+              `).join('')}
+            </div>`
+          : `<p class="text-[11px] text-slate-500 mt-2">No swap suggested — this is already a strong peer in its category.</p>`;
+
+        return `
+          <div class="card p-3 mb-2.5">
+            <div class="flex items-start justify-between gap-2">
+              <div class="min-w-0">
+                <div class="font-semibold text-sky-300 truncate">${r.label}</div>
+                ${r.sublabel ? `<div class="text-[10px] text-slate-500 truncate">${r.sublabel}</div>` : ''}
+                <div class="text-[11px] text-slate-400 mt-0.5">${r.role || r.assetClass || ''} · ${fmtMoney(r.value)}</div>
+              </div>
+              <div class="text-right shrink-0">
+                <div class="text-[10px] font-semibold ${statusCls}">${statusLabel}</div>
+                <span class="inline-block mt-1 text-[10px] px-1.5 py-0.5 rounded border ${badge}">${r.risk || '—'}</span>
+                ${r.er != null ? `<div class="text-[10px] text-slate-500 mt-1">ER ~${r.er}%</div>` : ''}
+              </div>
+            </div>
+            <p class="text-[11px] text-slate-300 mt-2 leading-relaxed">${r.summary}</p>
+            ${altHtml}
+            <div class="flex flex-wrap gap-2 mt-2 text-[10px]">
+              <a class="text-sky-400 underline" target="_blank" rel="noopener" href="${r.links.yahoo}">Yahoo Finance</a>
+              <a class="text-sky-400 underline" target="_blank" rel="noopener" href="${r.links.morningstar}">Morningstar</a>
+              <a class="text-sky-400 underline" target="_blank" rel="noopener" href="${r.links.etf}">ETF.com</a>
             </div>
           </div>
         `;
-        const top = cands[0];
-        html += `
-          <div class="card p-3 border-sky-700/50 bg-sky-950/30">
-            <p class="text-sm">
-              <span class="text-sky-400 font-semibold">Largest opportunity:</span>
-              Sell ${fmt(top.shares, 2)} shares of <strong>${top.ticker}</strong>
-              in “${top.account}” to realize a ${fmtMoney(-top.unrealized_gl)} loss
-              (≈ ${fmtMoney(top.est_savings)} tax savings).
-            </p>
-          </div>
-        `;
-      }
-      $('#panel-tlh').innerHTML = html;
+      }).join('');
+
+      html += `
+        <div class="card p-3 text-[11px] text-slate-500 leading-relaxed mb-2">
+          Tips: Prefer <strong class="text-slate-400">one</strong> core US equity fund (e.g. VOO or VTI) instead of stacking SPY + DIA + QQQ unless you want extra growth/tech tilt.
+          Pair with <strong class="text-slate-400">VXUS</strong> (international) and <strong class="text-slate-400">BND</strong> (bonds) if those sleeves are thin — see Look-thru HHI notes.
+        </div>
+      `;
+      $('#panel-optimize').innerHTML = html;
     }
 
     function showTab(name) {
@@ -2735,8 +2916,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       toast('CSV exported');
     });
 
-    $('#taxRate').addEventListener('change', () => { if (holdings.length) renderTLH(); });
-    $('#minLoss').addEventListener('change', () => { if (holdings.length) renderTLH(); });
+    
 
     // Init
     loadState();
