@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v48</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v49</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -3088,17 +3088,20 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const rmdAge = rmdAgeForBirthYear(birthYear);
       if (!rmdAge) return { error: 'Enter a valid birth year (e.g. 1972).' };
 
-      const tradStart = (buckets['Traditional IRA'] || 0) + (buckets['401k'] || 0);
-      let trad = Math.max(0, tradStart);
+      const iraStart = Math.max(0, buckets['Traditional IRA'] || 0);
+      const k401Start = Math.max(0, buckets['401k'] || 0);
+      const tradStart = iraStart + k401Start;
+      let ira = iraStart;
+      let k401 = k401Start;
       let rothBal = Math.max(0, buckets['Roth'] || 0);
       let taxableBal = Math.max(0, buckets['Taxable / other'] || 0);
 
       const ageNow = thisYear - birthYear;
       const rmdYear = birthYear + Math.floor(rmdAge);
-      const age59Year = birthYear + 60; // first full year at/after 59½
+      const age59Year = birthYear + 60;
       const spendStartAge = Math.max(59, parseInt(settings.spendStartAge, 10) || 60);
       const spendStartYear = birthYear + spendStartAge;
-      const planEndYear = rmdYear + 5; // a few years into RMDs
+      const planEndYear = rmdYear + 5;
 
       const g = (parseFloat(settings.growth) || 0) / 100;
       const bondG = Math.min(g, 0.03);
@@ -3114,48 +3117,75 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const years = [];
       let totalConverted = 0, totalTax = 0, totalSpend = 0;
 
+      // Withdraw from pre-tax: IRA first, then 401k (typical rollover/planning order)
+      function takePreTax(amount) {
+        let left = amount;
+        let fromIra = 0, from401 = 0;
+        if (left > 0 && ira > 0) {
+          fromIra = Math.min(left, ira);
+          ira -= fromIra;
+          left -= fromIra;
+        }
+        if (left > 0 && k401 > 0) {
+          from401 = Math.min(left, k401);
+          k401 -= from401;
+          left -= from401;
+        }
+        return { fromIra, from401, taken: fromIra + from401, short: left };
+      }
+
       for (let y = thisYear; y <= planEndYear; y++) {
         const age = y - birthYear;
-        // Grow balances
-        trad *= (1 + effG);
+        ira *= (1 + effG);
+        k401 *= (1 + effG);
         rothBal *= (1 + effG);
-        taxableBal *= (1 + Math.min(effG, g)); // taxable often similar mix
+        taxableBal *= (1 + Math.min(effG, g));
 
+        const trad = ira + k401;
         const isRmdYear = y >= rmdYear;
-        const canPenaltyFree = age >= 59; // approx 59½
+        const canPenaltyFree = age >= 59;
         const spendingActive = y >= spendStartYear && annualSpend > 0;
 
-        // Base taxable income before withdrawals/conversions
         let baseInc = otherIncome;
-        // Rough SS taxable portion once past full retirement age window — simplified: add 85% of SS if claiming
         if (age >= 67 && ssIncome > 0) baseInc += ssIncome * 0.85;
 
-        // Required RMD from traditional
         let rmd = 0;
         if (isRmdYear && trad > 0) {
           const div = RMD_DIVISORS[Math.min(85, Math.max(72, age))] || (age >= 75 ? 24.6 : 26.5);
           rmd = trad / div;
         }
 
-        // Spending allocation (priority: RMD → taxable → trad voluntary → Roth)
         let need = spendingActive ? annualSpend : 0;
+        const spendTarget = need;
         let fromRmd = 0, fromTaxable = 0, fromTrad = 0, fromRoth = 0;
+        let fromIraSpend = 0, from401Spend = 0;
 
-        if (need > 0 && rmd > 0) {
-          fromRmd = Math.min(need, rmd);
-          need -= fromRmd;
+        // 1) RMD must come out of pre-tax (counts toward spending)
+        if (rmd > 0) {
+          const t = takePreTax(rmd);
+          fromRmd = t.taken;
+          fromIraSpend += t.fromIra;
+          from401Spend += t.from401;
+          if (spendingActive) need = Math.max(0, need - fromRmd);
         }
+
+        // 2) Taxable brokerage
         if (need > 0 && taxableBal > 0) {
           fromTaxable = Math.min(need, taxableBal);
           taxableBal -= fromTaxable;
           need -= fromTaxable;
         }
-        if (need > 0 && trad > rmd) {
-          // extra trad withdrawal (penalty if under 59½)
-          const avail = trad - rmd;
-          fromTrad = Math.min(need, avail);
-          need -= fromTrad;
+
+        // 3) Extra IRA / 401k
+        if (need > 0 && (ira + k401) > 0) {
+          const t = takePreTax(need);
+          fromTrad = t.taken;
+          fromIraSpend += t.fromIra;
+          from401Spend += t.from401;
+          need -= t.taken;
         }
+
+        // 4) Roth last
         if (need > 0 && rothBal > 0) {
           fromRoth = Math.min(need, rothBal);
           rothBal -= fromRoth;
@@ -3163,72 +3193,79 @@ VTI,50,240.00,13250.00,Capital One Investing`
         }
 
         const tradWithdraw = fromRmd + fromTrad;
-        trad = Math.max(0, trad - tradWithdraw);
-
-        // MAGI proxy for IRMAA / NIIT: base + trad withdrawals + conversions (Roth conversions count toward MAGI)
-        // Conversion room uses income *before* optional conversion but *after* spending withdrawals from trad
         const incomeAfterSpend = baseInc + tradWithdraw;
         let room = spaceToBracketCeiling(incomeAfterSpend, filing, targetBracket);
-        // Soft-cap conversion so MAGI stays under next IRMAA cliff when possible
-        const tierNow = irmaaTier(incomeAfterSpend, filing);
         const tiers = IRMAA_TIERS[filing] || IRMAA_TIERS.mfj;
         const nextCliff = tiers.find(t => t.upTo > incomeAfterSpend);
-        if (nextCliff && isFinite(nextCliff.upTo)) {
-          const roomToCliff = Math.max(0, nextCliff.upTo - incomeAfterSpend - 1);
-          // Prefer not to cross IRMAA unless bracket room is the binding constraint for aggressive targets
-          if (targetBracket <= 0.24) room = Math.min(room, roomToCliff);
+        if (nextCliff && isFinite(nextCliff.upTo) && targetBracket <= 0.24) {
+          room = Math.min(room, Math.max(0, nextCliff.upTo - incomeAfterSpend - 1));
         }
 
-        // Only convert before first RMD year (classic gap-year strategy); still allow small fills later if room
-        let convert = 0;
-        if (y < rmdYear && trad > 0 && room > 0) {
-          convert = Math.min(trad, room);
-          trad -= convert;
+        // Convert from IRA first, then 401k (before RMD years)
+        let convert = 0, convertIra = 0, convert401 = 0;
+        if (y < rmdYear && (ira + k401) > 0 && room > 0) {
+          convert = Math.min(ira + k401, room);
+          const c = takePreTax(convert);
+          convert = c.taken;
+          convertIra = c.fromIra;
+          convert401 = c.from401;
           rothBal += convert;
         }
 
-        const ordinaryStack = tradWithdraw + convert;
-        const tax = taxOnOrdinary(ordinaryStack, baseInc, filing, stateRate);
-        // Penalty on pre-59½ trad withdrawals (not on conversions themselves, but on cash taken out)
+        const tax = taxOnOrdinary(tradWithdraw + convert, baseInc, filing, stateRate);
         let penalty = 0;
         if (!canPenaltyFree && fromTrad > 0) penalty = fromTrad * 0.10;
 
         const magi = incomeAfterSpend + convert;
         const irmaa = irmaaTier(magi, filing);
-        const niitHit = magi > niitTh;
-        // NIIT is on investment income — approximate flag only
         const notes = [];
         if (irmaa.label !== 'No IRMAA') notes.push(irmaa.label);
-        if (niitHit) notes.push('NIIT risk');
+        if (magi > niitTh) notes.push('NIIT risk');
         if (!canPenaltyFree && fromTrad > 0) notes.push('10% early penalty');
         if (need > 1) notes.push('shortfall');
         if (y < rmdYear && convert > 0 && age < 59) notes.push('pay tax from taxable if possible');
 
         totalConverted += convert;
         totalTax += tax + penalty;
-        totalSpend += (annualSpend - need);
+        totalSpend += (spendTarget - need);
 
         years.push({
-          year: y, age, convert, tax: tax + penalty, endTrad: trad, endRoth: rothBal, endTaxable: taxableBal,
-          room, rmd, fromRmd, fromTaxable, fromTrad, fromRoth, shortfall: need,
-          magi, irmaa: irmaa.label, niitHit, notes, spendingActive, canPenaltyFree
+          year: y, age, convert, convertIra, convert401, tax: tax + penalty,
+          endIra: ira, end401: k401, endTrad: ira + k401, endRoth: rothBal, endTaxable: taxableBal,
+          spend: spendingActive ? annualSpend : 0,
+          spendFunded: spendingActive ? (annualSpend - need) : 0,
+          room, rmd, fromRmd, fromTaxable, fromTrad, fromRoth, fromIraSpend, from401Spend,
+          shortfall: need, magi, irmaa: irmaa.label, notes, spendingActive, canPenaltyFree
         });
       }
 
       const firstRmdRow = years.find(r => r.year === rmdYear);
-      // Baseline: no conversions — approximate first RMD
-      let balNo = Math.max(0, tradStart);
-      for (let y = thisYear; y <= rmdYear; y++) balNo *= (1 + effG);
+      // Balances just before first RMD withdrawal are end balances + rmd taken that year
+      const balAtRmd = firstRmdRow
+        ? (firstRmdRow.endTrad + (firstRmdRow.rmd || 0))
+        : 0;
+      const firstRmd = firstRmdRow ? firstRmdRow.rmd : 0;
+      const rmdTax = firstRmdRow
+        ? taxOnOrdinary(firstRmd, otherIncome + ((ageNow + (rmdYear - thisYear) >= 67 && ssIncome) ? ssIncome * 0.85 : 0), filing, stateRate)
+        : 0;
+
+      // No-conversion baseline: grow IRA+401k to RMD with same spending from taxable/roth only if possible — simplify: grow all trad, no converts
+      let iraNo = iraStart, k401No = k401Start;
+      for (let y = thisYear; y <= rmdYear; y++) {
+        iraNo *= (1 + effG);
+        k401No *= (1 + effG);
+      }
+      const balNo = iraNo + k401No;
       const div0 = RMD_DIVISORS[Math.floor(rmdAge)] || 24.6;
-      const firstRmdNo = balNo / div0;
+      const firstRmdNo = balNo > 0 ? balNo / div0 : 0;
+      const rmdTaxNo = taxOnOrdinary(firstRmdNo, otherIncome, filing, stateRate);
 
       return {
         birthYear, rmdAge, ageNow, rmdYear, age59Year, spendStartYear, spendStartAge,
         years, totalConverted, totalTax, totalSpend,
-        firstRmd: firstRmdRow ? firstRmdRow.rmd : 0,
-        balAtRmd: firstRmdRow ? firstRmdRow.endTrad + (firstRmdRow.rmd || 0) : 0,
-        balNo, firstRmdNo,
-        effG, equityPct, tradStart,
+        firstRmd, balAtRmd, rmdTax,
+        balNo, firstRmdNo, rmdTaxNo,
+        effG, equityPct, tradStart, iraStart, k401Start,
         taxableStart: buckets['Taxable / other'] || 0,
         rothStart: buckets['Roth'] || 0
       };
@@ -3405,59 +3442,72 @@ VTI,50,240.00,13250.00,Capital One Investing`
         <div class="card p-3 mb-3 border border-sky-800/40">
           <h3 class="text-sm font-semibold text-sky-200 mb-1">Spending schedule (age ${plan.spendStartAge}+)</h3>
           <p class="text-[10px] text-slate-500 mb-2 leading-snug">
-            Target ${fmtMoney(s.annualSpend)}/yr starting ${plan.spendStartYear}.
-            Order: <strong class="text-slate-400">RMD</strong> → <strong class="text-slate-400">taxable</strong> → <strong class="text-slate-400">IRA/401k</strong> → <strong class="text-slate-400">Roth</strong>.
-            Penalty-free IRA/401k access is modeled from age 59+.
+            Target <strong class="text-slate-300">${fmtMoney(s.annualSpend)}/yr</strong> from ${plan.spendStartYear}.
+            Columns show spending and <strong class="text-slate-300">year-end balances</strong> after growth, withdrawals, and conversions.
+            Draw order: RMD → taxable → IRA → 401(k) → Roth.
           </p>
-          <div class="scroll-x max-h-80 overflow-y-auto">
+          <div class="scroll-x max-h-96 overflow-y-auto">
             <table class="w-full text-left text-[10px]">
               <thead><tr class="text-slate-400">
                 <th class="py-1 pr-1">Yr</th>
                 <th class="py-1 pr-1">Age</th>
+                <th class="py-1 pr-1 text-right">Spend</th>
+                <th class="py-1 pr-1 text-right">IRA bal</th>
+                <th class="py-1 pr-1 text-right">401(k)</th>
+                <th class="py-1 pr-1 text-right">Roth bal</th>
                 <th class="py-1 pr-1 text-right">RMD</th>
-                <th class="py-1 pr-1 text-right">Taxable</th>
-                <th class="py-1 pr-1 text-right">IRA</th>
-                <th class="py-1 pr-1 text-right">Roth</th>
-                <th class="py-1">Flags</th>
               </tr></thead>
               <tbody>
-                ${(spendYears.length ? spendYears : plan.years.filter(r => r.age >= 59).slice(0, 12)).map(r => `
+                ${(spendYears.length ? spendYears : plan.years.filter(r => r.age >= plan.spendStartAge)).map(r => `
                   <tr class="border-t border-slate-700">
-                    <td class="py-1 pr-1 text-slate-300">${r.year}</td>
-                    <td class="py-1 pr-1 text-slate-400">${r.age}</td>
-                    <td class="py-1 pr-1 text-right text-amber-200">${r.fromRmd || r.rmd ? fmtMoney(r.fromRmd || r.rmd) : '—'}</td>
-                    <td class="py-1 pr-1 text-right text-slate-300">${r.fromTaxable ? fmtMoney(r.fromTaxable) : '—'}</td>
-                    <td class="py-1 pr-1 text-right text-sky-300">${r.fromTrad ? fmtMoney(r.fromTrad) : '—'}</td>
-                    <td class="py-1 pr-1 text-right text-emerald-300">${r.fromRoth ? fmtMoney(r.fromRoth) : '—'}</td>
-                    <td class="py-1 text-[10px] ${r.notes.length ? 'text-amber-300' : 'text-slate-600'}">${r.notes.join(' · ') || 'ok'}</td>
+                    <td class="py-1.5 pr-1 text-slate-300">${r.year}</td>
+                    <td class="py-1.5 pr-1 text-slate-400">${r.age}</td>
+                    <td class="py-1.5 pr-1 text-right text-slate-200">${r.spend ? fmtMoney(r.spend) : '—'}${r.shortfall > 1 ? '<span class="text-rose-400">*</span>' : ''}</td>
+                    <td class="py-1.5 pr-1 text-right text-sky-300">${fmtMoney(r.endIra)}</td>
+                    <td class="py-1.5 pr-1 text-right text-indigo-300">${fmtMoney(r.end401)}</td>
+                    <td class="py-1.5 pr-1 text-right text-emerald-300">${fmtMoney(r.endRoth)}</td>
+                    <td class="py-1.5 pr-1 text-right text-amber-200">${r.rmd ? fmtMoney(r.rmd) : '—'}</td>
                   </tr>`).join('')}
               </tbody>
             </table>
           </div>
           <p class="text-[10px] text-slate-500 mt-2">
-            After RMDs begin, required withdrawals count toward spending first. Roth is last so tax-free dollars last longer.
-            Shortfall means balances were insufficient for that year’s spend target.
+            * Shortfall = spend target not fully funded that year.
+            Taxable brokerage is also drawn when needed (not shown as a balance column).
           </p>
         </div>
 
         <div class="card p-3 mb-3 border border-amber-800/40">
-          <h3 class="text-sm font-semibold text-amber-200 mb-2">First RMD (${plan.rmdYear})</h3>
+          <h3 class="text-sm font-semibold text-amber-200 mb-2">At first RMD (${plan.rmdYear}, age ${Math.floor(plan.rmdAge)})</h3>
           <div class="space-y-1 text-xs">
-            <div class="flex justify-between"><span class="text-slate-400">First RMD with this plan ≈</span><span class="text-sky-300">${fmtMoney(plan.firstRmd)}</span></div>
-            <div class="flex justify-between"><span class="text-slate-400">First RMD if no conversions ≈</span><span class="text-amber-300">${fmtMoney(plan.firstRmdNo)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Trad balance if you follow plan</span><span class="text-slate-200">${fmtMoney(plan.balAtRmd)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">First RMD ≈</span><span class="text-sky-300">${fmtMoney(plan.firstRmd)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Tax on that RMD ≈</span><span class="text-rose-300">${fmtMoney(plan.rmdTax || 0)}</span></div>
+            <div class="border-t border-slate-700 my-1.5"></div>
+            <div class="flex justify-between"><span class="text-slate-400">If no conversions (trad grows)</span><span class="text-slate-200">${fmtMoney(plan.balNo)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">First RMD with no plan ≈</span><span class="text-amber-300">${fmtMoney(plan.firstRmdNo)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Tax on that RMD ≈</span><span class="text-rose-300">${fmtMoney(plan.rmdTaxNo || 0)}</span></div>
             <div class="flex justify-between font-semibold pt-1">
               <span class="text-emerald-300">RMD size reduction ≈</span>
               <span class="text-emerald-300">${fmtMoney(Math.max(0, plan.firstRmdNo - plan.firstRmd))}</span>
             </div>
+            <div class="flex justify-between font-semibold">
+              <span class="text-emerald-300">RMD tax reduction ≈</span>
+              <span class="text-emerald-300">${fmtMoney(Math.max(0, (plan.rmdTaxNo || 0) - (plan.rmdTax || 0)))}</span>
+            </div>
           </div>
-          <p class="text-[10px] text-slate-500 mt-2">Growth ${fmt(plan.effG * 100, 1)}%/yr blended from pre-tax equity share ${fmt(plan.equityPct * 100, 0)}%.</p>
+          <p class="text-[10px] text-slate-500 mt-2 leading-snug">
+            Effective growth ${fmt(plan.effG * 100, 1)}%/yr (pre-tax equity share ${fmt(plan.equityPct * 100, 0)}% at ${s.growth}%, bonds lower).
+            Divisor at age ${Math.floor(plan.rmdAge)} ≈ ${RMD_DIVISORS[Math.floor(plan.rmdAge)] || '—'}.
+            Starting IRA ${fmtMoney(plan.iraStart)} · 401(k) ${fmtMoney(plan.k401Start)}.
+          </p>
         </div>
 
         <div class="card p-3 text-[11px] text-slate-500 leading-relaxed mb-2">
           <strong class="text-slate-400">Suggested pattern:</strong>
           Before 59½, convert within bracket/IRMAA room and pay tax from taxable cash.
-          From 59½ until RMDs, spend taxable first, keep converting if income is low, then use IRA.
-          After RMDs, take the RMD, then taxable, then extra IRA only if needed, Roth last.
+          From 59½ until RMDs, spend taxable first, keep converting if income is low, then IRA then 401(k).
+          After RMDs, take the RMD, then taxable, then extra pre-tax only if needed, Roth last.
         </div>
       `;
 
