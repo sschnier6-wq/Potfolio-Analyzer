@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v47</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v48</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -2991,7 +2991,10 @@ VTI,50,240.00,13250.00,Capital One Investing`
     function loadRothSettings() {
       try {
         const raw = localStorage.getItem('portfolio_roth_v1');
-        if (raw) return JSON.parse(raw);
+        if (raw) return Object.assign({
+          birthYear: 1972, filing: 'mfj', otherIncome: 40000, targetBracket: 0.22,
+          growth: 6, stateTax: 0, annualSpend: 80000, spendStartAge: 60, ssIncome: 0
+        }, JSON.parse(raw));
       } catch (_) {}
       return {
         birthYear: 1972,
@@ -2999,7 +3002,10 @@ VTI,50,240.00,13250.00,Capital One Investing`
         otherIncome: 40000,
         targetBracket: 0.22,
         growth: 6,
-        stateTax: 0
+        stateTax: 0,
+        annualSpend: 80000,
+        spendStartAge: 60,
+        ssIncome: 0
       };
     }
 
@@ -3007,11 +3013,40 @@ VTI,50,240.00,13250.00,Capital One Investing`
       try { localStorage.setItem('portfolio_roth_v1', JSON.stringify(s)); } catch (_) {}
     }
 
-    function taxOnConversion(conversion, otherIncome, filing, stateRate) {
+    // Approx IRMAA MAGI thresholds (Part B/D) — 2026-ish, MFJ / Single
+    // IRMAA uses MAGI from 2 years prior; we flag when *current* MAGI would set a future cliff.
+    const IRMAA_TIERS = {
+      single: [
+        { upTo: 106000, label: 'No IRMAA' },
+        { upTo: 133000, label: 'IRMAA tier 1' },
+        { upTo: 167000, label: 'IRMAA tier 2' },
+        { upTo: 200000, label: 'IRMAA tier 3' },
+        { upTo: 500000, label: 'IRMAA tier 4' },
+        { upTo: Infinity, label: 'IRMAA tier 5 (top)' }
+      ],
+      mfj: [
+        { upTo: 212000, label: 'No IRMAA' },
+        { upTo: 266000, label: 'IRMAA tier 1' },
+        { upTo: 334000, label: 'IRMAA tier 2' },
+        { upTo: 400000, label: 'IRMAA tier 3' },
+        { upTo: 750000, label: 'IRMAA tier 4' },
+        { upTo: Infinity, label: 'IRMAA tier 5 (top)' }
+      ]
+    };
+    const NIIT_THRESHOLD = { single: 200000, mfj: 250000 };
+
+    function irmaaTier(magi, filing) {
+      const tiers = IRMAA_TIERS[filing] || IRMAA_TIERS.mfj;
+      for (const t of tiers) {
+        if (magi <= t.upTo) return t;
+      }
+      return tiers[tiers.length - 1];
+    }
+
+    function taxOnOrdinary(amount, baseIncome, filing, stateRate) {
       const brackets = FED_BRACKETS_2026[filing] || FED_BRACKETS_2026.mfj;
-      // Stack conversion on top of other taxable income; simple marginal-fill model
-      let remaining = conversion;
-      let income = Math.max(0, otherIncome);
+      let remaining = Math.max(0, amount);
+      let income = Math.max(0, baseIncome);
       let tax = 0;
       for (const b of brackets) {
         if (remaining <= 0) break;
@@ -3026,13 +3061,12 @@ VTI,50,240.00,13250.00,Capital One Investing`
         income += take;
       }
       if (remaining > 0) tax += remaining * 0.37;
-      tax += conversion * (stateRate || 0);
+      tax += amount * (stateRate || 0);
       return tax;
     }
 
     function spaceToBracketCeiling(otherIncome, filing, targetRate) {
       const brackets = FED_BRACKETS_2026[filing] || FED_BRACKETS_2026.mfj;
-      // Find ceiling of the target bracket
       let ceiling = null;
       for (const b of brackets) {
         if (Math.abs(b.rate - targetRate) < 0.001) {
@@ -3041,110 +3075,180 @@ VTI,50,240.00,13250.00,Capital One Investing`
         }
       }
       if (ceiling == null || !isFinite(ceiling)) {
-        // default: top of 22%
         const b22 = brackets.find(b => Math.abs(b.rate - 0.22) < 0.001);
         ceiling = b22 ? b22.upTo : 100000;
       }
       return Math.max(0, ceiling - Math.max(0, otherIncome));
     }
 
-    function buildRothPlan(settings, tradBalance, equityPct) {
+    function buildRothPlan(settings, buckets, equityPct) {
       const now = new Date();
       const thisYear = now.getFullYear();
       const birthYear = parseInt(settings.birthYear, 10);
       const rmdAge = rmdAgeForBirthYear(birthYear);
       if (!rmdAge) return { error: 'Enter a valid birth year (e.g. 1972).' };
+
+      const tradStart = (buckets['Traditional IRA'] || 0) + (buckets['401k'] || 0);
+      let trad = Math.max(0, tradStart);
+      let rothBal = Math.max(0, buckets['Roth'] || 0);
+      let taxableBal = Math.max(0, buckets['Taxable / other'] || 0);
+
       const ageNow = thisYear - birthYear;
       const rmdYear = birthYear + Math.floor(rmdAge);
-      // First RMD is for the year you turn RMD age; can delay to Apr 1 next year but we plan through the year before RMD
-      const lastConversionYear = rmdYear - 1;
-      const years = [];
-      let bal = Math.max(0, tradBalance);
+      const age59Year = birthYear + 60; // first full year at/after 59½
+      const spendStartAge = Math.max(59, parseInt(settings.spendStartAge, 10) || 60);
+      const spendStartYear = birthYear + spendStartAge;
+      const planEndYear = rmdYear + 5; // a few years into RMDs
+
       const g = (parseFloat(settings.growth) || 0) / 100;
-      // Blend growth: equityPct * growth + (1-equityPct) * lower bond-ish return
       const bondG = Math.min(g, 0.03);
       const effG = equityPct * g + (1 - equityPct) * bondG;
-      let totalConverted = 0;
-      let totalTax = 0;
+      const filing = settings.filing || 'mfj';
+      const otherIncome = parseFloat(settings.otherIncome) || 0;
+      const ssIncome = parseFloat(settings.ssIncome) || 0;
+      const annualSpend = Math.max(0, parseFloat(settings.annualSpend) || 0);
+      const stateRate = (parseFloat(settings.stateTax) || 0) / 100;
+      const targetBracket = parseFloat(settings.targetBracket) || 0.22;
+      const niitTh = NIIT_THRESHOLD[filing] || NIIT_THRESHOLD.mfj;
 
-      for (let y = thisYear; y <= lastConversionYear; y++) {
+      const years = [];
+      let totalConverted = 0, totalTax = 0, totalSpend = 0;
+
+      for (let y = thisYear; y <= planEndYear; y++) {
         const age = y - birthYear;
-        // Growth during the year before conversion (simplified: grow, then convert)
-        bal = bal * (1 + effG);
-        const room = spaceToBracketCeiling(
-          parseFloat(settings.otherIncome) || 0,
-          settings.filing || 'mfj',
-          parseFloat(settings.targetBracket) || 0.22
-        );
-        const convert = Math.min(bal, room);
-        const tax = taxOnConversion(
-          convert,
-          parseFloat(settings.otherIncome) || 0,
-          settings.filing || 'mfj',
-          (parseFloat(settings.stateTax) || 0) / 100
-        );
-        bal -= convert;
-        totalConverted += convert;
-        totalTax += tax;
-        years.push({
-          year: y,
-          age,
-          convert,
-          tax,
-          endTrad: bal,
-          room
-        });
-        if (bal < 1) {
-          // drained early
-          break;
+        // Grow balances
+        trad *= (1 + effG);
+        rothBal *= (1 + effG);
+        taxableBal *= (1 + Math.min(effG, g)); // taxable often similar mix
+
+        const isRmdYear = y >= rmdYear;
+        const canPenaltyFree = age >= 59; // approx 59½
+        const spendingActive = y >= spendStartYear && annualSpend > 0;
+
+        // Base taxable income before withdrawals/conversions
+        let baseInc = otherIncome;
+        // Rough SS taxable portion once past full retirement age window — simplified: add 85% of SS if claiming
+        if (age >= 67 && ssIncome > 0) baseInc += ssIncome * 0.85;
+
+        // Required RMD from traditional
+        let rmd = 0;
+        if (isRmdYear && trad > 0) {
+          const div = RMD_DIVISORS[Math.min(85, Math.max(72, age))] || (age >= 75 ? 24.6 : 26.5);
+          rmd = trad / div;
         }
+
+        // Spending allocation (priority: RMD → taxable → trad voluntary → Roth)
+        let need = spendingActive ? annualSpend : 0;
+        let fromRmd = 0, fromTaxable = 0, fromTrad = 0, fromRoth = 0;
+
+        if (need > 0 && rmd > 0) {
+          fromRmd = Math.min(need, rmd);
+          need -= fromRmd;
+        }
+        if (need > 0 && taxableBal > 0) {
+          fromTaxable = Math.min(need, taxableBal);
+          taxableBal -= fromTaxable;
+          need -= fromTaxable;
+        }
+        if (need > 0 && trad > rmd) {
+          // extra trad withdrawal (penalty if under 59½)
+          const avail = trad - rmd;
+          fromTrad = Math.min(need, avail);
+          need -= fromTrad;
+        }
+        if (need > 0 && rothBal > 0) {
+          fromRoth = Math.min(need, rothBal);
+          rothBal -= fromRoth;
+          need -= fromRoth;
+        }
+
+        const tradWithdraw = fromRmd + fromTrad;
+        trad = Math.max(0, trad - tradWithdraw);
+
+        // MAGI proxy for IRMAA / NIIT: base + trad withdrawals + conversions (Roth conversions count toward MAGI)
+        // Conversion room uses income *before* optional conversion but *after* spending withdrawals from trad
+        const incomeAfterSpend = baseInc + tradWithdraw;
+        let room = spaceToBracketCeiling(incomeAfterSpend, filing, targetBracket);
+        // Soft-cap conversion so MAGI stays under next IRMAA cliff when possible
+        const tierNow = irmaaTier(incomeAfterSpend, filing);
+        const tiers = IRMAA_TIERS[filing] || IRMAA_TIERS.mfj;
+        const nextCliff = tiers.find(t => t.upTo > incomeAfterSpend);
+        if (nextCliff && isFinite(nextCliff.upTo)) {
+          const roomToCliff = Math.max(0, nextCliff.upTo - incomeAfterSpend - 1);
+          // Prefer not to cross IRMAA unless bracket room is the binding constraint for aggressive targets
+          if (targetBracket <= 0.24) room = Math.min(room, roomToCliff);
+        }
+
+        // Only convert before first RMD year (classic gap-year strategy); still allow small fills later if room
+        let convert = 0;
+        if (y < rmdYear && trad > 0 && room > 0) {
+          convert = Math.min(trad, room);
+          trad -= convert;
+          rothBal += convert;
+        }
+
+        const ordinaryStack = tradWithdraw + convert;
+        const tax = taxOnOrdinary(ordinaryStack, baseInc, filing, stateRate);
+        // Penalty on pre-59½ trad withdrawals (not on conversions themselves, but on cash taken out)
+        let penalty = 0;
+        if (!canPenaltyFree && fromTrad > 0) penalty = fromTrad * 0.10;
+
+        const magi = incomeAfterSpend + convert;
+        const irmaa = irmaaTier(magi, filing);
+        const niitHit = magi > niitTh;
+        // NIIT is on investment income — approximate flag only
+        const notes = [];
+        if (irmaa.label !== 'No IRMAA') notes.push(irmaa.label);
+        if (niitHit) notes.push('NIIT risk');
+        if (!canPenaltyFree && fromTrad > 0) notes.push('10% early penalty');
+        if (need > 1) notes.push('shortfall');
+        if (y < rmdYear && convert > 0 && age < 59) notes.push('pay tax from taxable if possible');
+
+        totalConverted += convert;
+        totalTax += tax + penalty;
+        totalSpend += (annualSpend - need);
+
+        years.push({
+          year: y, age, convert, tax: tax + penalty, endTrad: trad, endRoth: rothBal, endTaxable: taxableBal,
+          room, rmd, fromRmd, fromTaxable, fromTrad, fromRoth, shortfall: need,
+          magi, irmaa: irmaa.label, niitHit, notes, spendingActive, canPenaltyFree
+        });
       }
 
-      // Project first RMD on remaining balance
-      const firstRmdAge = Math.floor(rmdAge);
-      const div = RMD_DIVISORS[firstRmdAge] || 24.6;
-      // Grow one more year into RMD year
-      const balAtRmd = bal * (1 + effG);
-      const firstRmd = balAtRmd > 0 ? balAtRmd / div : 0;
-      const rmdTax = taxOnConversion(
-        firstRmd,
-        parseFloat(settings.otherIncome) || 0,
-        settings.filing || 'mfj',
-        (parseFloat(settings.stateTax) || 0) / 100
-      );
-
-      // No-conversion baseline: grow trad to RMD, full RMD tax pressure
-      let balNo = Math.max(0, tradBalance);
+      const firstRmdRow = years.find(r => r.year === rmdYear);
+      // Baseline: no conversions — approximate first RMD
+      let balNo = Math.max(0, tradStart);
       for (let y = thisYear; y <= rmdYear; y++) balNo *= (1 + effG);
-      const firstRmdNo = balNo / div;
-      const rmdTaxNo = taxOnConversion(
-        firstRmdNo,
-        parseFloat(settings.otherIncome) || 0,
-        settings.filing || 'mfj',
-        (parseFloat(settings.stateTax) || 0) / 100
-      );
+      const div0 = RMD_DIVISORS[Math.floor(rmdAge)] || 24.6;
+      const firstRmdNo = balNo / div0;
 
       return {
-        birthYear, rmdAge, ageNow, rmdYear, lastConversionYear,
-        years, totalConverted, totalTax,
-        balAtRmd, firstRmd, rmdTax,
-        balNo, firstRmdNo, rmdTaxNo,
-        effG, equityPct, tradStart: tradBalance
+        birthYear, rmdAge, ageNow, rmdYear, age59Year, spendStartYear, spendStartAge,
+        years, totalConverted, totalTax, totalSpend,
+        firstRmd: firstRmdRow ? firstRmdRow.rmd : 0,
+        balAtRmd: firstRmdRow ? firstRmdRow.endTrad + (firstRmdRow.rmd || 0) : 0,
+        balNo, firstRmdNo,
+        effG, equityPct, tradStart,
+        taxableStart: buckets['Taxable / other'] || 0,
+        rothStart: buckets['Roth'] || 0
       };
     }
 
     function renderRoth() {
-      const { buckets, trad, roth, equityPct } = retirementBuckets();
+      const { buckets, trad, equityPct } = retirementBuckets();
       const s = loadRothSettings();
-      const plan = buildRothPlan(s, trad, equityPct);
+      const plan = buildRothPlan(s, buckets, equityPct);
       const rmdAge = rmdAgeForBirthYear(s.birthYear);
+      const filing = s.filing || 'mfj';
+      const irmaaList = (IRMAA_TIERS[filing] || IRMAA_TIERS.mfj);
+      const niitTh = NIIT_THRESHOLD[filing] || NIIT_THRESHOLD.mfj;
 
       let html = `
         <div class="card p-3 mb-3 text-xs text-slate-400 leading-relaxed">
-          Year-by-year <strong class="text-slate-300">Roth conversion</strong> sketch from now until the year before RMDs.
-          Uses balances in accounts labeled Traditional IRA / 401k from the <strong class="text-slate-300">selected files</strong>,
-          your equity mix for growth, and approx. <strong class="text-slate-300">2026 federal brackets</strong>.
-          <span class="text-amber-300/90">Not tax advice</span> — confirm with a CPA/advisor (IRMAA, NIIT, state rules, QCDs, and withholding matter).
+          Roth conversions, <strong class="text-slate-300">IRMAA / NIIT flags</strong>, and a
+          <strong class="text-slate-300">spending schedule from age 59½+</strong> across taxable, IRA/401k, and Roth.
+          Uses selected-file balances and approx. 2026 brackets.
+          <span class="text-amber-300/90">Not tax advice</span> — verify with a CPA (IRMAA is based on MAGI from 2 years prior).
         </div>
 
         <div class="card p-3 mb-3">
@@ -3162,6 +3266,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
             </label>
             <label class="text-slate-400">Other taxable income $/yr
               <input id="rothIncome" type="number" value="${s.otherIncome}" min="0" step="1000"
+                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+            </label>
+            <label class="text-slate-400">Social Security $/yr (opt.)
+              <input id="rothSS" type="number" value="${s.ssIncome || 0}" min="0" step="1000"
+                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+            </label>
+            <label class="text-slate-400">Annual spending $
+              <input id="rothSpend" type="number" value="${s.annualSpend}" min="0" step="1000"
+                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+            </label>
+            <label class="text-slate-400">Spend starts at age
+              <input id="rothSpendAge" type="number" value="${s.spendStartAge}" min="59" max="75"
                 class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
             </label>
             <label class="text-slate-400">Fill up to bracket
@@ -3187,7 +3303,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
           <p class="text-[10px] text-slate-500 mt-2 leading-snug">
             RMD age (SECURE 2.0):
             ${rmdAge ? `<span class="text-emerald-300 font-semibold">${rmdAge}</span> (born ${s.birthYear})` : '— enter birth year'}.
-            Other income = wages/pension/interest you expect <em>before</em> counting conversions (taxable income proxy).
+            Spending order after ${s.spendStartAge}: RMD → taxable → IRA/401k → Roth.
           </p>
         </div>
 
@@ -3208,7 +3324,30 @@ VTI,50,240.00,13250.00,Capital One Investing`
               <span class="text-slate-300">${fmt(equityPct * 100, 0)}%</span>
             </div>
           </div>
-          <p class="text-[10px] text-slate-500 mt-2">Account type is inferred from account names (IRA, Roth, 401k, Rollover…). Rename labels in your export if detection is off.</p>
+        </div>
+
+        <div class="card p-3 mb-3 border border-rose-900/40">
+          <h3 class="text-sm font-semibold text-rose-200 mb-2">IRMAA &amp; other tax cliffs</h3>
+          <p class="text-[11px] text-slate-400 mb-2 leading-snug">
+            IRMAA (Medicare Part B/D surcharge) is based on MAGI from <strong class="text-slate-300">2 years earlier</strong>.
+            Conversions and IRA withdrawals raise MAGI. Thresholds below are approximate for planning (${filing === 'mfj' ? 'joint' : 'single'}):
+          </p>
+          <div class="space-y-0.5 text-[11px] mb-2">
+            ${irmaaList.map((t, i) => {
+              const prev = i === 0 ? 0 : irmaaList[i - 1].upTo + 1;
+              const range = isFinite(t.upTo)
+                ? `${fmtMoney(prev)} – ${fmtMoney(t.upTo)}`
+                : `over ${fmtMoney(prev)}`;
+              return `<div class="flex justify-between"><span class="text-slate-400">${t.label}</span><span class="text-slate-300">${range}</span></div>`;
+            }).join('')}
+          </div>
+          <ul class="text-[11px] text-slate-400 space-y-1 list-disc pl-4 leading-snug">
+            <li><strong class="text-slate-300">NIIT 3.8%</strong> may apply when MAGI exceeds ~${fmtMoney(niitTh)} (${filing === 'mfj' ? 'joint' : 'single'}) — mainly on investment income, but MAGI includes conversions.</li>
+            <li><strong class="text-slate-300">Bracket cliffs:</strong> 24%→32% is a steep jump; the plan prefers filling only through your chosen bracket.</li>
+            <li><strong class="text-slate-300">Under 59½:</strong> IRA cash withdrawals (not the conversion itself) can face a 10% penalty; pay conversion tax from taxable cash if possible.</li>
+            <li><strong class="text-slate-300">QCDs</strong> (age 70½+) can satisfy RMDs tax-free to charity — not modeled here.</li>
+            <li><strong class="text-slate-300">State tax</strong> on conversions/withdrawals is applied at the rate you enter.</li>
+          </ul>
         </div>
       `;
 
@@ -3219,72 +3358,106 @@ VTI,50,240.00,13250.00,Capital One Investing`
         return;
       }
 
-      if (trad <= 0) {
-        html += `<div class="card p-4 text-center text-slate-400 text-sm">No Traditional IRA / 401k balances detected in the selected files. Load those accounts or check account names.</div>`;
+      if (trad <= 0 && (buckets['Taxable / other'] || 0) <= 0 && (buckets['Roth'] || 0) <= 0) {
+        html += `<div class="card p-4 text-center text-slate-400 text-sm">No balances detected. Load IRA/401k/taxable files.</div>`;
         $('#panel-roth').innerHTML = html;
         wireRothForm();
         return;
       }
 
+      const convYears = plan.years.filter(r => r.convert > 0);
+      const spendYears = plan.years.filter(r => r.spendingActive);
+
       html += `
         <div class="grid grid-cols-2 gap-2 mb-3">
-          <div class="metric"><div class="label">Years to convert</div><div class="value text-sky-300">${plan.years.length}</div></div>
+          <div class="metric"><div class="label">Convert years</div><div class="value text-sky-300">${convYears.length}</div></div>
           <div class="metric"><div class="label">RMD starts</div><div class="value text-amber-300">${plan.rmdYear}</div></div>
           <div class="metric"><div class="label">Total convert ≈</div><div class="value text-emerald-300">${fmtMoney(plan.totalConverted)}</div></div>
-          <div class="metric"><div class="label">Tax on converts ≈</div><div class="value text-rose-300">${fmtMoney(plan.totalTax)}</div></div>
+          <div class="metric"><div class="label">Tax+penalty ≈</div><div class="value text-rose-300">${fmtMoney(plan.totalTax)}</div></div>
         </div>
 
         <div class="card p-3 mb-3">
-          <h3 class="text-sm font-semibold text-slate-300 mb-2">Conversion schedule</h3>
-          <div class="scroll-x max-h-80 overflow-y-auto">
-            <table class="w-full text-left text-xs">
+          <h3 class="text-sm font-semibold text-slate-300 mb-1">Conversion + tax flags</h3>
+          <p class="text-[10px] text-slate-500 mb-2">Conversions stop before RMD year; room is reduced to avoid the next IRMAA cliff when practical.</p>
+          <div class="scroll-x max-h-72 overflow-y-auto">
+            <table class="w-full text-left text-[11px]">
               <thead><tr class="text-slate-400">
-                <th class="py-1 pr-2">Year</th>
-                <th class="py-1 pr-2">Age</th>
-                <th class="py-1 pr-2 text-right">Convert</th>
-                <th class="py-1 pr-2 text-right">Tax≈</th>
-                <th class="py-1 text-right">Trad left</th>
+                <th class="py-1 pr-1">Yr</th>
+                <th class="py-1 pr-1">Age</th>
+                <th class="py-1 pr-1 text-right">Convert</th>
+                <th class="py-1 pr-1 text-right">Tax≈</th>
+                <th class="py-1">Flags</th>
               </tr></thead>
               <tbody>
-                ${plan.years.map(r => `
+                ${plan.years.filter(r => r.year < plan.rmdYear || r.convert > 0).map(r => `
                   <tr class="border-t border-slate-700">
-                    <td class="py-1.5 pr-2 text-slate-300">${r.year}</td>
-                    <td class="py-1.5 pr-2 text-slate-400">${r.age}</td>
-                    <td class="py-1.5 pr-2 text-right text-emerald-300">${fmtMoney(r.convert)}</td>
-                    <td class="py-1.5 pr-2 text-right text-rose-300">${fmtMoney(r.tax)}</td>
-                    <td class="py-1.5 text-right text-slate-400">${fmtMoney(r.endTrad)}</td>
+                    <td class="py-1 pr-1 text-slate-300">${r.year}</td>
+                    <td class="py-1 pr-1 text-slate-400">${r.age}</td>
+                    <td class="py-1 pr-1 text-right text-emerald-300">${r.convert ? fmtMoney(r.convert) : '—'}</td>
+                    <td class="py-1 pr-1 text-right text-rose-300">${r.tax ? fmtMoney(r.tax) : '—'}</td>
+                    <td class="py-1 text-[10px] ${r.notes.length ? 'text-amber-300' : 'text-slate-600'}">${r.notes.join(' · ') || 'ok'}</td>
                   </tr>`).join('')}
               </tbody>
             </table>
           </div>
-          <p class="text-[10px] text-slate-500 mt-2">Each year converts up to the room left in your chosen federal bracket after “other income,” then applies optional state tax on the conversion.</p>
         </div>
 
-        <div class="card p-3 mb-3 border border-amber-800/40">
-          <h3 class="text-sm font-semibold text-amber-200 mb-2">At first RMD (${plan.rmdYear}, age ${Math.floor(plan.rmdAge)})</h3>
-          <div class="space-y-1 text-xs">
-            <div class="flex justify-between"><span class="text-slate-400">Trad balance if you follow plan</span><span class="text-slate-200">${fmtMoney(plan.balAtRmd)}</span></div>
-            <div class="flex justify-between"><span class="text-slate-400">First RMD ≈</span><span class="text-sky-300">${fmtMoney(plan.firstRmd)}</span></div>
-            <div class="flex justify-between"><span class="text-slate-400">Tax on that RMD ≈</span><span class="text-rose-300">${fmtMoney(plan.rmdTax)}</span></div>
-            <div class="border-t border-slate-700 my-1.5"></div>
-            <div class="flex justify-between"><span class="text-slate-400">If no conversions (trad grows)</span><span class="text-slate-200">${fmtMoney(plan.balNo)}</span></div>
-            <div class="flex justify-between"><span class="text-slate-400">First RMD with no plan ≈</span><span class="text-amber-300">${fmtMoney(plan.firstRmdNo)}</span></div>
-            <div class="flex justify-between"><span class="text-slate-400">Tax on that RMD ≈</span><span class="text-rose-300">${fmtMoney(plan.rmdTaxNo)}</span></div>
-            <div class="flex justify-between font-semibold pt-1">
-              <span class="text-emerald-300">RMD tax reduction ≈</span>
-              <span class="text-emerald-300">${fmtMoney(Math.max(0, plan.rmdTaxNo - plan.rmdTax))}</span>
-            </div>
+        <div class="card p-3 mb-3 border border-sky-800/40">
+          <h3 class="text-sm font-semibold text-sky-200 mb-1">Spending schedule (age ${plan.spendStartAge}+)</h3>
+          <p class="text-[10px] text-slate-500 mb-2 leading-snug">
+            Target ${fmtMoney(s.annualSpend)}/yr starting ${plan.spendStartYear}.
+            Order: <strong class="text-slate-400">RMD</strong> → <strong class="text-slate-400">taxable</strong> → <strong class="text-slate-400">IRA/401k</strong> → <strong class="text-slate-400">Roth</strong>.
+            Penalty-free IRA/401k access is modeled from age 59+.
+          </p>
+          <div class="scroll-x max-h-80 overflow-y-auto">
+            <table class="w-full text-left text-[10px]">
+              <thead><tr class="text-slate-400">
+                <th class="py-1 pr-1">Yr</th>
+                <th class="py-1 pr-1">Age</th>
+                <th class="py-1 pr-1 text-right">RMD</th>
+                <th class="py-1 pr-1 text-right">Taxable</th>
+                <th class="py-1 pr-1 text-right">IRA</th>
+                <th class="py-1 pr-1 text-right">Roth</th>
+                <th class="py-1">Flags</th>
+              </tr></thead>
+              <tbody>
+                ${(spendYears.length ? spendYears : plan.years.filter(r => r.age >= 59).slice(0, 12)).map(r => `
+                  <tr class="border-t border-slate-700">
+                    <td class="py-1 pr-1 text-slate-300">${r.year}</td>
+                    <td class="py-1 pr-1 text-slate-400">${r.age}</td>
+                    <td class="py-1 pr-1 text-right text-amber-200">${r.fromRmd || r.rmd ? fmtMoney(r.fromRmd || r.rmd) : '—'}</td>
+                    <td class="py-1 pr-1 text-right text-slate-300">${r.fromTaxable ? fmtMoney(r.fromTaxable) : '—'}</td>
+                    <td class="py-1 pr-1 text-right text-sky-300">${r.fromTrad ? fmtMoney(r.fromTrad) : '—'}</td>
+                    <td class="py-1 pr-1 text-right text-emerald-300">${r.fromRoth ? fmtMoney(r.fromRoth) : '—'}</td>
+                    <td class="py-1 text-[10px] ${r.notes.length ? 'text-amber-300' : 'text-slate-600'}">${r.notes.join(' · ') || 'ok'}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
           </div>
-          <p class="text-[10px] text-slate-500 mt-2 leading-snug">
-            Effective growth used: ${fmt(plan.effG * 100, 1)}%/yr (blend of your pre-tax equity share ${fmt(plan.equityPct * 100, 0)}% at ${s.growth}% and bonds at a lower rate).
-            Divisor at age ${Math.floor(plan.rmdAge)} ≈ ${RMD_DIVISORS[Math.floor(plan.rmdAge)] || '—'}.
+          <p class="text-[10px] text-slate-500 mt-2">
+            After RMDs begin, required withdrawals count toward spending first. Roth is last so tax-free dollars last longer.
+            Shortfall means balances were insufficient for that year’s spend target.
           </p>
         </div>
 
+        <div class="card p-3 mb-3 border border-amber-800/40">
+          <h3 class="text-sm font-semibold text-amber-200 mb-2">First RMD (${plan.rmdYear})</h3>
+          <div class="space-y-1 text-xs">
+            <div class="flex justify-between"><span class="text-slate-400">First RMD with this plan ≈</span><span class="text-sky-300">${fmtMoney(plan.firstRmd)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">First RMD if no conversions ≈</span><span class="text-amber-300">${fmtMoney(plan.firstRmdNo)}</span></div>
+            <div class="flex justify-between font-semibold pt-1">
+              <span class="text-emerald-300">RMD size reduction ≈</span>
+              <span class="text-emerald-300">${fmtMoney(Math.max(0, plan.firstRmdNo - plan.firstRmd))}</span>
+            </div>
+          </div>
+          <p class="text-[10px] text-slate-500 mt-2">Growth ${fmt(plan.effG * 100, 1)}%/yr blended from pre-tax equity share ${fmt(plan.equityPct * 100, 0)}%.</p>
+        </div>
+
         <div class="card p-3 text-[11px] text-slate-500 leading-relaxed mb-2">
-          <strong class="text-slate-400">How to use this:</strong> Prefer conversions in lower-income years before Social Security and RMDs.
-          Pay conversion tax from taxable cash when possible so more stays in the Roth.
-          Watch IRMAA cliffs and the 24%→32% jump. Revisit each year as balances and laws change.
+          <strong class="text-slate-400">Suggested pattern:</strong>
+          Before 59½, convert within bracket/IRMAA room and pay tax from taxable cash.
+          From 59½ until RMDs, spend taxable first, keep converting if income is low, then use IRA.
+          After RMDs, take the RMD, then taxable, then extra IRA only if needed, Roth last.
         </div>
       `;
 
@@ -3300,6 +3473,9 @@ VTI,50,240.00,13250.00,Capital One Investing`
           birthYear: parseInt(document.getElementById('rothBirth')?.value, 10) || 1972,
           filing: document.getElementById('rothFiling')?.value || 'mfj',
           otherIncome: parseFloat(document.getElementById('rothIncome')?.value) || 0,
+          ssIncome: parseFloat(document.getElementById('rothSS')?.value) || 0,
+          annualSpend: parseFloat(document.getElementById('rothSpend')?.value) || 0,
+          spendStartAge: parseInt(document.getElementById('rothSpendAge')?.value, 10) || 60,
           targetBracket: parseFloat(document.getElementById('rothBracket')?.value) || 0.22,
           growth: parseFloat(document.getElementById('rothGrowth')?.value) || 6,
           stateTax: parseFloat(document.getElementById('rothState')?.value) || 0
