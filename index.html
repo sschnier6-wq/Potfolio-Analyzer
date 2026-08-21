@@ -31,7 +31,7 @@
     .metric { background: #1e293b; border-radius: 0.75rem; padding: 0.85rem 0.75rem; text-align: center; border: 1px solid #334155; }
     .metric .label { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; }
     .metric .value { font-size: 1.15rem; font-weight: 700; margin-top: 0.15rem; }
-    .tab-btn { flex: 1; padding: 0.65rem 0.25rem; font-size: 0.78rem; font-weight: 600; color: #94a3b8; border-bottom: 2px solid transparent; }
+    .tab-btn { flex: 1; padding: 0.65rem 0.2rem; font-size: 0.72rem; font-weight: 600; color: #94a3b8; border-bottom: 2px solid transparent; white-space: nowrap; }
     .tab-btn.active { color: #38bdf8; border-bottom-color: #38bdf8; }
     .loss { color: #f87171; }
     .gain { color: #4ade80; }
@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v46</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v47</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -135,6 +135,7 @@
         <button class="tab-btn" data-tab="positions">Positions</button>
         <button class="tab-btn" data-tab="overlap">Look-thru</button>
         <button class="tab-btn" data-tab="optimize">Optimize</button>
+        <button class="tab-btn" data-tab="roth">Roth</button>
       </div>
 
       <!-- Tab panels -->
@@ -142,6 +143,7 @@
       <div id="panel-positions" class="tab-panel hidden"></div>
       <div id="panel-overlap" class="tab-panel hidden"></div>
       <div id="panel-optimize" class="tab-panel hidden"></div>
+      <div id="panel-roth" class="tab-panel hidden"></div>
     </section>
   </main>
 
@@ -1732,6 +1734,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
         $('#panel-positions').innerHTML = '';
         $('#panel-overlap').innerHTML = '';
         $('#panel-optimize').innerHTML = '';
+        const pr = document.getElementById('panel-roth');
+        if (pr) pr.innerHTML = '';
         showTab(currentTab);
         return;
       }
@@ -1740,6 +1744,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       renderPositions();
       renderOverlap();
       renderOptimize();
+      renderRoth();
       showTab(currentTab);
     }
 
@@ -2907,14 +2912,413 @@ VTI,50,240.00,13250.00,Capital One Investing`
       $('#panel-optimize').innerHTML = html;
     }
 
+    // ——— Roth conversion planner (to RMD age) ———
+    // SECURE 2.0: RMD age 73 if born 1951–1959; 75 if born 1960+
+    function rmdAgeForBirthYear(by) {
+      const y = parseInt(by, 10);
+      if (!y || y < 1900 || y > 2010) return null;
+      if (y >= 1960) return 75;
+      if (y >= 1951) return 73;
+      if (y >= 1949) return 72;
+      return 70.5;
+    }
+
+    // Approx 2026 federal ordinary brackets (taxable income ceilings)
+    const FED_BRACKETS_2026 = {
+      single: [
+        { rate: 0.10, upTo: 12400 },
+        { rate: 0.12, upTo: 50400 },
+        { rate: 0.22, upTo: 105700 },
+        { rate: 0.24, upTo: 201775 },
+        { rate: 0.32, upTo: 256225 },
+        { rate: 0.35, upTo: 640600 },
+        { rate: 0.37, upTo: Infinity }
+      ],
+      mfj: [
+        { rate: 0.10, upTo: 24800 },
+        { rate: 0.12, upTo: 100800 },
+        { rate: 0.22, upTo: 211400 },
+        { rate: 0.24, upTo: 403550 },
+        { rate: 0.32, upTo: 512450 },
+        { rate: 0.35, upTo: 768700 },
+        { rate: 0.37, upTo: Infinity }
+      ]
+    };
+
+    // Uniform Lifetime Table (approx) — age → divisor
+    const RMD_DIVISORS = {
+      72: 27.4, 73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1,
+      80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0
+    };
+
+    function classifyAccountTaxType(p) {
+      const a = String(p.account || '').toUpperCase();
+      const b = String(p.broker || '').toUpperCase();
+      const src = String(p.source_file || '').toUpperCase();
+      const blob = a + ' ' + b + ' ' + src;
+      if (/ROTH/i.test(blob)) return 'Roth';
+      if (/401\s*K|401K|403\s*B|457|PENSION|TSP/i.test(blob)) return '401k';
+      if (/IRA|ROLLOVER|SEP|SIMPLE|TRADITIONAL/i.test(blob)) return 'Traditional IRA';
+      // Fidelity common names
+      if (/TI C AND SP|COMPANY STOCK|RETIREMENT/i.test(blob) && !/ROTH/i.test(blob)) return '401k';
+      return 'Taxable / other';
+    }
+
+    function retirementBuckets() {
+      const buckets = {
+        'Traditional IRA': 0,
+        '401k': 0,
+        'Roth': 0,
+        'Taxable / other': 0
+      };
+      const equityInTrad = { eq: 0, total: 0 };
+      viewHoldings().forEach(p => {
+        if (p.is_home) return;
+        const t = classifyAccountTaxType(p);
+        const v = p.market_value || 0;
+        buckets[t] = (buckets[t] || 0) + v;
+        if (t === 'Traditional IRA' || t === '401k') {
+          equityInTrad.total += v;
+          const style = classifyEquityStyle(p);
+          if (!/Bonds|Cash|Annuities/i.test(style)) equityInTrad.eq += v;
+        }
+      });
+      const trad = (buckets['Traditional IRA'] || 0) + (buckets['401k'] || 0);
+      const equityPct = equityInTrad.total > 0 ? equityInTrad.eq / equityInTrad.total : 0.7;
+      return { buckets, trad, roth: buckets['Roth'] || 0, equityPct };
+    }
+
+    function loadRothSettings() {
+      try {
+        const raw = localStorage.getItem('portfolio_roth_v1');
+        if (raw) return JSON.parse(raw);
+      } catch (_) {}
+      return {
+        birthYear: 1972,
+        filing: 'mfj',
+        otherIncome: 40000,
+        targetBracket: 0.22,
+        growth: 6,
+        stateTax: 0
+      };
+    }
+
+    function saveRothSettings(s) {
+      try { localStorage.setItem('portfolio_roth_v1', JSON.stringify(s)); } catch (_) {}
+    }
+
+    function taxOnConversion(conversion, otherIncome, filing, stateRate) {
+      const brackets = FED_BRACKETS_2026[filing] || FED_BRACKETS_2026.mfj;
+      // Stack conversion on top of other taxable income; simple marginal-fill model
+      let remaining = conversion;
+      let income = Math.max(0, otherIncome);
+      let tax = 0;
+      for (const b of brackets) {
+        if (remaining <= 0) break;
+        const room = Math.max(0, b.upTo - income);
+        if (room <= 0) {
+          income = Math.max(income, b.upTo);
+          continue;
+        }
+        const take = Math.min(remaining, room);
+        tax += take * b.rate;
+        remaining -= take;
+        income += take;
+      }
+      if (remaining > 0) tax += remaining * 0.37;
+      tax += conversion * (stateRate || 0);
+      return tax;
+    }
+
+    function spaceToBracketCeiling(otherIncome, filing, targetRate) {
+      const brackets = FED_BRACKETS_2026[filing] || FED_BRACKETS_2026.mfj;
+      // Find ceiling of the target bracket
+      let ceiling = null;
+      for (const b of brackets) {
+        if (Math.abs(b.rate - targetRate) < 0.001) {
+          ceiling = b.upTo;
+          break;
+        }
+      }
+      if (ceiling == null || !isFinite(ceiling)) {
+        // default: top of 22%
+        const b22 = brackets.find(b => Math.abs(b.rate - 0.22) < 0.001);
+        ceiling = b22 ? b22.upTo : 100000;
+      }
+      return Math.max(0, ceiling - Math.max(0, otherIncome));
+    }
+
+    function buildRothPlan(settings, tradBalance, equityPct) {
+      const now = new Date();
+      const thisYear = now.getFullYear();
+      const birthYear = parseInt(settings.birthYear, 10);
+      const rmdAge = rmdAgeForBirthYear(birthYear);
+      if (!rmdAge) return { error: 'Enter a valid birth year (e.g. 1972).' };
+      const ageNow = thisYear - birthYear;
+      const rmdYear = birthYear + Math.floor(rmdAge);
+      // First RMD is for the year you turn RMD age; can delay to Apr 1 next year but we plan through the year before RMD
+      const lastConversionYear = rmdYear - 1;
+      const years = [];
+      let bal = Math.max(0, tradBalance);
+      const g = (parseFloat(settings.growth) || 0) / 100;
+      // Blend growth: equityPct * growth + (1-equityPct) * lower bond-ish return
+      const bondG = Math.min(g, 0.03);
+      const effG = equityPct * g + (1 - equityPct) * bondG;
+      let totalConverted = 0;
+      let totalTax = 0;
+
+      for (let y = thisYear; y <= lastConversionYear; y++) {
+        const age = y - birthYear;
+        // Growth during the year before conversion (simplified: grow, then convert)
+        bal = bal * (1 + effG);
+        const room = spaceToBracketCeiling(
+          parseFloat(settings.otherIncome) || 0,
+          settings.filing || 'mfj',
+          parseFloat(settings.targetBracket) || 0.22
+        );
+        const convert = Math.min(bal, room);
+        const tax = taxOnConversion(
+          convert,
+          parseFloat(settings.otherIncome) || 0,
+          settings.filing || 'mfj',
+          (parseFloat(settings.stateTax) || 0) / 100
+        );
+        bal -= convert;
+        totalConverted += convert;
+        totalTax += tax;
+        years.push({
+          year: y,
+          age,
+          convert,
+          tax,
+          endTrad: bal,
+          room
+        });
+        if (bal < 1) {
+          // drained early
+          break;
+        }
+      }
+
+      // Project first RMD on remaining balance
+      const firstRmdAge = Math.floor(rmdAge);
+      const div = RMD_DIVISORS[firstRmdAge] || 24.6;
+      // Grow one more year into RMD year
+      const balAtRmd = bal * (1 + effG);
+      const firstRmd = balAtRmd > 0 ? balAtRmd / div : 0;
+      const rmdTax = taxOnConversion(
+        firstRmd,
+        parseFloat(settings.otherIncome) || 0,
+        settings.filing || 'mfj',
+        (parseFloat(settings.stateTax) || 0) / 100
+      );
+
+      // No-conversion baseline: grow trad to RMD, full RMD tax pressure
+      let balNo = Math.max(0, tradBalance);
+      for (let y = thisYear; y <= rmdYear; y++) balNo *= (1 + effG);
+      const firstRmdNo = balNo / div;
+      const rmdTaxNo = taxOnConversion(
+        firstRmdNo,
+        parseFloat(settings.otherIncome) || 0,
+        settings.filing || 'mfj',
+        (parseFloat(settings.stateTax) || 0) / 100
+      );
+
+      return {
+        birthYear, rmdAge, ageNow, rmdYear, lastConversionYear,
+        years, totalConverted, totalTax,
+        balAtRmd, firstRmd, rmdTax,
+        balNo, firstRmdNo, rmdTaxNo,
+        effG, equityPct, tradStart: tradBalance
+      };
+    }
+
+    function renderRoth() {
+      const { buckets, trad, roth, equityPct } = retirementBuckets();
+      const s = loadRothSettings();
+      const plan = buildRothPlan(s, trad, equityPct);
+      const rmdAge = rmdAgeForBirthYear(s.birthYear);
+
+      let html = `
+        <div class="card p-3 mb-3 text-xs text-slate-400 leading-relaxed">
+          Year-by-year <strong class="text-slate-300">Roth conversion</strong> sketch from now until the year before RMDs.
+          Uses balances in accounts labeled Traditional IRA / 401k from the <strong class="text-slate-300">selected files</strong>,
+          your equity mix for growth, and approx. <strong class="text-slate-300">2026 federal brackets</strong>.
+          <span class="text-amber-300/90">Not tax advice</span> — confirm with a CPA/advisor (IRMAA, NIIT, state rules, QCDs, and withholding matter).
+        </div>
+
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold text-slate-300 mb-2">Your inputs</h3>
+          <div class="grid grid-cols-2 gap-2 text-xs">
+            <label class="text-slate-400">Birth year
+              <input id="rothBirth" type="number" value="${s.birthYear}" min="1930" max="2010"
+                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+            </label>
+            <label class="text-slate-400">Filing status
+              <select id="rothFiling" class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300">
+                <option value="mfj" ${s.filing === 'mfj' ? 'selected' : ''}>Married joint</option>
+                <option value="single" ${s.filing === 'single' ? 'selected' : ''}>Single</option>
+              </select>
+            </label>
+            <label class="text-slate-400">Other taxable income $/yr
+              <input id="rothIncome" type="number" value="${s.otherIncome}" min="0" step="1000"
+                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+            </label>
+            <label class="text-slate-400">Fill up to bracket
+              <select id="rothBracket" class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300">
+                <option value="0.12" ${Number(s.targetBracket) === 0.12 ? 'selected' : ''}>12%</option>
+                <option value="0.22" ${Number(s.targetBracket) === 0.22 ? 'selected' : ''}>22%</option>
+                <option value="0.24" ${Number(s.targetBracket) === 0.24 ? 'selected' : ''}>24%</option>
+              </select>
+            </label>
+            <label class="text-slate-400">Expected growth %
+              <input id="rothGrowth" type="number" value="${s.growth}" min="0" max="15" step="0.5"
+                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+            </label>
+            <label class="text-slate-400">State tax % (optional)
+              <input id="rothState" type="number" value="${s.stateTax}" min="0" max="15" step="0.1"
+                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+            </label>
+          </div>
+          <button type="button" id="btnRothRecalc"
+            class="mt-3 w-full text-sm font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-lg py-2">
+            Update plan
+          </button>
+          <p class="text-[10px] text-slate-500 mt-2 leading-snug">
+            RMD age (SECURE 2.0):
+            ${rmdAge ? `<span class="text-emerald-300 font-semibold">${rmdAge}</span> (born ${s.birthYear})` : '— enter birth year'}.
+            Other income = wages/pension/interest you expect <em>before</em> counting conversions (taxable income proxy).
+          </p>
+        </div>
+
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold text-slate-300 mb-2">Detected from portfolio</h3>
+          <div class="space-y-1 text-xs">
+            ${Object.entries(buckets).map(([k, v]) => `
+              <div class="flex justify-between">
+                <span class="text-slate-400">${k}</span>
+                <span class="text-slate-200">${fmtMoney(v)}</span>
+              </div>`).join('')}
+            <div class="flex justify-between border-t border-slate-700 pt-1 mt-1 font-semibold">
+              <span class="text-amber-200">Pre-tax (IRA + 401k)</span>
+              <span class="text-amber-200">${fmtMoney(trad)}</span>
+            </div>
+            <div class="flex justify-between">
+              <span class="text-slate-400">Equity share of pre-tax</span>
+              <span class="text-slate-300">${fmt(equityPct * 100, 0)}%</span>
+            </div>
+          </div>
+          <p class="text-[10px] text-slate-500 mt-2">Account type is inferred from account names (IRA, Roth, 401k, Rollover…). Rename labels in your export if detection is off.</p>
+        </div>
+      `;
+
+      if (plan.error) {
+        html += `<div class="card p-4 text-center text-rose-300 text-sm">${plan.error}</div>`;
+        $('#panel-roth').innerHTML = html;
+        wireRothForm();
+        return;
+      }
+
+      if (trad <= 0) {
+        html += `<div class="card p-4 text-center text-slate-400 text-sm">No Traditional IRA / 401k balances detected in the selected files. Load those accounts or check account names.</div>`;
+        $('#panel-roth').innerHTML = html;
+        wireRothForm();
+        return;
+      }
+
+      html += `
+        <div class="grid grid-cols-2 gap-2 mb-3">
+          <div class="metric"><div class="label">Years to convert</div><div class="value text-sky-300">${plan.years.length}</div></div>
+          <div class="metric"><div class="label">RMD starts</div><div class="value text-amber-300">${plan.rmdYear}</div></div>
+          <div class="metric"><div class="label">Total convert ≈</div><div class="value text-emerald-300">${fmtMoney(plan.totalConverted)}</div></div>
+          <div class="metric"><div class="label">Tax on converts ≈</div><div class="value text-rose-300">${fmtMoney(plan.totalTax)}</div></div>
+        </div>
+
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold text-slate-300 mb-2">Conversion schedule</h3>
+          <div class="scroll-x max-h-80 overflow-y-auto">
+            <table class="w-full text-left text-xs">
+              <thead><tr class="text-slate-400">
+                <th class="py-1 pr-2">Year</th>
+                <th class="py-1 pr-2">Age</th>
+                <th class="py-1 pr-2 text-right">Convert</th>
+                <th class="py-1 pr-2 text-right">Tax≈</th>
+                <th class="py-1 text-right">Trad left</th>
+              </tr></thead>
+              <tbody>
+                ${plan.years.map(r => `
+                  <tr class="border-t border-slate-700">
+                    <td class="py-1.5 pr-2 text-slate-300">${r.year}</td>
+                    <td class="py-1.5 pr-2 text-slate-400">${r.age}</td>
+                    <td class="py-1.5 pr-2 text-right text-emerald-300">${fmtMoney(r.convert)}</td>
+                    <td class="py-1.5 pr-2 text-right text-rose-300">${fmtMoney(r.tax)}</td>
+                    <td class="py-1.5 text-right text-slate-400">${fmtMoney(r.endTrad)}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+          <p class="text-[10px] text-slate-500 mt-2">Each year converts up to the room left in your chosen federal bracket after “other income,” then applies optional state tax on the conversion.</p>
+        </div>
+
+        <div class="card p-3 mb-3 border border-amber-800/40">
+          <h3 class="text-sm font-semibold text-amber-200 mb-2">At first RMD (${plan.rmdYear}, age ${Math.floor(plan.rmdAge)})</h3>
+          <div class="space-y-1 text-xs">
+            <div class="flex justify-between"><span class="text-slate-400">Trad balance if you follow plan</span><span class="text-slate-200">${fmtMoney(plan.balAtRmd)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">First RMD ≈</span><span class="text-sky-300">${fmtMoney(plan.firstRmd)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Tax on that RMD ≈</span><span class="text-rose-300">${fmtMoney(plan.rmdTax)}</span></div>
+            <div class="border-t border-slate-700 my-1.5"></div>
+            <div class="flex justify-between"><span class="text-slate-400">If no conversions (trad grows)</span><span class="text-slate-200">${fmtMoney(plan.balNo)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">First RMD with no plan ≈</span><span class="text-amber-300">${fmtMoney(plan.firstRmdNo)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Tax on that RMD ≈</span><span class="text-rose-300">${fmtMoney(plan.rmdTaxNo)}</span></div>
+            <div class="flex justify-between font-semibold pt-1">
+              <span class="text-emerald-300">RMD tax reduction ≈</span>
+              <span class="text-emerald-300">${fmtMoney(Math.max(0, plan.rmdTaxNo - plan.rmdTax))}</span>
+            </div>
+          </div>
+          <p class="text-[10px] text-slate-500 mt-2 leading-snug">
+            Effective growth used: ${fmt(plan.effG * 100, 1)}%/yr (blend of your pre-tax equity share ${fmt(plan.equityPct * 100, 0)}% at ${s.growth}% and bonds at a lower rate).
+            Divisor at age ${Math.floor(plan.rmdAge)} ≈ ${RMD_DIVISORS[Math.floor(plan.rmdAge)] || '—'}.
+          </p>
+        </div>
+
+        <div class="card p-3 text-[11px] text-slate-500 leading-relaxed mb-2">
+          <strong class="text-slate-400">How to use this:</strong> Prefer conversions in lower-income years before Social Security and RMDs.
+          Pay conversion tax from taxable cash when possible so more stays in the Roth.
+          Watch IRMAA cliffs and the 24%→32% jump. Revisit each year as balances and laws change.
+        </div>
+      `;
+
+      $('#panel-roth').innerHTML = html;
+      wireRothForm();
+    }
+
+    function wireRothForm() {
+      const btn = document.getElementById('btnRothRecalc');
+      if (!btn) return;
+      btn.onclick = () => {
+        const s = {
+          birthYear: parseInt(document.getElementById('rothBirth')?.value, 10) || 1972,
+          filing: document.getElementById('rothFiling')?.value || 'mfj',
+          otherIncome: parseFloat(document.getElementById('rothIncome')?.value) || 0,
+          targetBracket: parseFloat(document.getElementById('rothBracket')?.value) || 0.22,
+          growth: parseFloat(document.getElementById('rothGrowth')?.value) || 6,
+          stateTax: parseFloat(document.getElementById('rothState')?.value) || 0
+        };
+        saveRothSettings(s);
+        renderRoth();
+        toast('Roth plan updated');
+      };
+    }
+
     function showTab(name) {
       currentTab = name;
       $$('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
       $$('.tab-panel').forEach(p => p.classList.add('hidden'));
       const panel = $(`#panel-${name}`);
       if (panel) panel.classList.remove('hidden');
-      // re-render charts if needed
+      // re-render charts / planners if needed
       if (name === 'overview' && holdings.length) renderOverview();
+      if (name === 'roth' && holdings.length) renderRoth();
     }
 
     // ========== Persistence ==========
