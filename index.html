@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v49</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v51</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -2993,7 +2993,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
         const raw = localStorage.getItem('portfolio_roth_v1');
         if (raw) return Object.assign({
           birthYear: 1972, filing: 'mfj', otherIncome: 40000, targetBracket: 0.22,
-          growth: 6, stateTax: 0, annualSpend: 80000, spendStartAge: 60, ssIncome: 0
+          growth: 6, stateTax: 0, annualSpend: 80000, spendStartAge: 60, ssIncome: 0,
+          avoidIrmaa: true
         }, JSON.parse(raw));
       } catch (_) {}
       return {
@@ -3005,7 +3006,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
         stateTax: 0,
         annualSpend: 80000,
         spendStartAge: 60,
-        ssIncome: 0
+        ssIncome: 0,
+        avoidIrmaa: true
       };
     }
 
@@ -3035,12 +3037,91 @@ VTI,50,240.00,13250.00,Capital One Investing`
     };
     const NIIT_THRESHOLD = { single: 200000, mfj: 250000 };
 
+    // Approx extra annual Medicare Part B + Part D IRMAA (household, 2026-ish $)
+    // Applied for ~2 years after a high-MAGI year (IRMAA lag). Simplified: count each high year × 2.
+    const IRMAA_ANNUAL_EXTRA = {
+      'No IRMAA': 0,
+      'IRMAA tier 1': 2400,
+      'IRMAA tier 2': 6200,
+      'IRMAA tier 3': 10000,
+      'IRMAA tier 4': 13800,
+      'IRMAA tier 5 (top)': 15000
+    };
+
     function irmaaTier(magi, filing) {
       const tiers = IRMAA_TIERS[filing] || IRMAA_TIERS.mfj;
       for (const t of tiers) {
         if (magi <= t.upTo) return t;
       }
       return tiers[tiers.length - 1];
+    }
+
+    function estimateIrmaaCost(years) {
+      // Each conversion-year MAGI that lands in a surcharge tier is assumed to trigger
+      // ~2 years of that tier's extra premiums (2-year lookback simplification).
+      let cost = 0;
+      let yearsHit = 0;
+      (years || []).forEach(r => {
+        if (!r.convert && !r.fromTrad && !r.rmd) return;
+        const label = r.irmaa || 'No IRMAA';
+        const annual = IRMAA_ANNUAL_EXTRA[label] || 0;
+        if (annual > 0) {
+          cost += annual * 2;
+          yearsHit += 1;
+        }
+      });
+      return { cost, yearsHit };
+    }
+
+    function scoreRothPlan(plan) {
+      if (!plan || plan.error) return { score: Infinity, irmaaCost: 0, yearsHit: 0, allIn: Infinity };
+      const { cost: irmaaCost, yearsHit } = estimateIrmaaCost(plan.years);
+      // All-in sketch: conversion tax + IRMAA premiums + first RMD tax
+      // Bonus for dollars moved to Roth (reduces future RMDs): $0.15 per $1 converted as proxy
+      const allIn = (plan.totalTax || 0) + irmaaCost + (plan.rmdTax || 0) - (plan.totalConverted || 0) * 0.15;
+      return { score: allIn, irmaaCost, yearsHit, allIn };
+    }
+
+    function chooseBestRothPlan(settings, buckets, equityPct) {
+      const withCap = buildRothPlan(Object.assign({}, settings, { avoidIrmaa: true }), buckets, equityPct);
+      const noCap = buildRothPlan(Object.assign({}, settings, { avoidIrmaa: false }), buckets, equityPct);
+      if (withCap.error) return noCap.error ? withCap : noCap;
+      if (noCap.error) return withCap;
+
+      const sCap = scoreRothPlan(withCap);
+      const sNo = scoreRothPlan(noCap);
+
+      // Prefer lower all-in score; if within 2%, prefer more converted
+      let chosen, other, reason;
+      const close = Math.abs(sCap.score - sNo.score) / (Math.max(Math.abs(sCap.score), Math.abs(sNo.score), 1)) < 0.02;
+      if (close) {
+        if ((noCap.totalConverted || 0) > (withCap.totalConverted || 0) * 1.05) {
+          chosen = noCap; other = withCap; reason = 'Similar all-in cost; larger Roth conversion without IRMAA cap.';
+        } else {
+          chosen = withCap; other = noCap; reason = 'Similar all-in cost; staying under IRMAA is cleaner.';
+        }
+      } else if (sCap.score <= sNo.score) {
+        chosen = withCap; other = noCap;
+        reason = sCap.irmaaCost < sNo.irmaaCost
+          ? 'Avoiding IRMAA saves more in Medicare surcharges than the extra bracket room is worth.'
+          : 'Capping under IRMAA has the lower estimated all-in cost.';
+      } else {
+        chosen = noCap; other = withCap;
+        reason = 'Using full bracket room converts more and lowers future RMDs enough to outweigh estimated IRMAA.';
+      }
+
+      chosen.strategy = chosen.avoidIrmaa ? 'avoid-irmaa' : 'full-bracket';
+      chosen.strategyReason = reason;
+      chosen.alt = {
+        avoidIrmaa: other.avoidIrmaa,
+        totalConverted: other.totalConverted,
+        totalTax: other.totalTax,
+        rmdTax: other.rmdTax,
+        firstRmd: other.firstRmd,
+        score: scoreRothPlan(other)
+      };
+      chosen.score = chosen.avoidIrmaa ? sCap : sNo;
+      return chosen;
     }
 
     function taxOnOrdinary(amount, baseIncome, filing, stateRate) {
@@ -3065,19 +3146,25 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return tax;
     }
 
-    function spaceToBracketCeiling(otherIncome, filing, targetRate) {
+    function bracketCeiling(filing, targetRate) {
+      const rate = Number(targetRate);
       const brackets = FED_BRACKETS_2026[filing] || FED_BRACKETS_2026.mfj;
-      let ceiling = null;
       for (const b of brackets) {
-        if (Math.abs(b.rate - targetRate) < 0.001) {
-          ceiling = b.upTo;
-          break;
-        }
+        if (Math.abs(b.rate - rate) < 0.001) return b.upTo;
       }
-      if (ceiling == null || !isFinite(ceiling)) {
-        const b22 = brackets.find(b => Math.abs(b.rate - 0.22) < 0.001);
-        ceiling = b22 ? b22.upTo : 100000;
+      // Fallback: nearest bracket by rate
+      let best = brackets[0];
+      let bestDiff = Infinity;
+      for (const b of brackets) {
+        const d = Math.abs(b.rate - rate);
+        if (d < bestDiff) { bestDiff = d; best = b; }
       }
+      return best.upTo;
+    }
+
+    function spaceToBracketCeiling(otherIncome, filing, targetRate) {
+      const ceiling = bracketCeiling(filing, targetRate);
+      if (!isFinite(ceiling)) return 0;
       return Math.max(0, ceiling - Math.max(0, otherIncome));
     }
 
@@ -3111,8 +3198,11 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const ssIncome = parseFloat(settings.ssIncome) || 0;
       const annualSpend = Math.max(0, parseFloat(settings.annualSpend) || 0);
       const stateRate = (parseFloat(settings.stateTax) || 0) / 100;
-      const targetBracket = parseFloat(settings.targetBracket) || 0.22;
+      const targetBracket = Number(settings.targetBracket);
+      const targetRate = (!isNaN(targetBracket) && targetBracket > 0) ? targetBracket : 0.22;
+      const avoidIrmaa = settings.avoidIrmaa !== false;
       const niitTh = NIIT_THRESHOLD[filing] || NIIT_THRESHOLD.mfj;
+      const bracketTop = bracketCeiling(filing, targetRate);
 
       const years = [];
       let totalConverted = 0, totalTax = 0, totalSpend = 0;
@@ -3194,11 +3284,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
         const tradWithdraw = fromRmd + fromTrad;
         const incomeAfterSpend = baseInc + tradWithdraw;
-        let room = spaceToBracketCeiling(incomeAfterSpend, filing, targetBracket);
-        const tiers = IRMAA_TIERS[filing] || IRMAA_TIERS.mfj;
-        const nextCliff = tiers.find(t => t.upTo > incomeAfterSpend);
-        if (nextCliff && isFinite(nextCliff.upTo) && targetBracket <= 0.24) {
-          room = Math.min(room, Math.max(0, nextCliff.upTo - incomeAfterSpend - 1));
+        // Primary limit: fill up through the user-selected federal bracket
+        let bracketRoom = spaceToBracketCeiling(incomeAfterSpend, filing, targetRate);
+        let room = bracketRoom;
+        let irmaaCap = null;
+        if (avoidIrmaa) {
+          // Soft-cap so MAGI stays in the current IRMAA band (often "No IRMAA")
+          const tiers = IRMAA_TIERS[filing] || IRMAA_TIERS.mfj;
+          const band = tiers.find(t => incomeAfterSpend <= t.upTo) || tiers[tiers.length - 1];
+          if (band && isFinite(band.upTo)) {
+            irmaaCap = Math.max(0, band.upTo - incomeAfterSpend);
+            room = Math.min(room, irmaaCap);
+          }
         }
 
         // Convert from IRA first, then 401k (before RMD years)
@@ -3234,7 +3331,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
           endIra: ira, end401: k401, endTrad: ira + k401, endRoth: rothBal, endTaxable: taxableBal,
           spend: spendingActive ? annualSpend : 0,
           spendFunded: spendingActive ? (annualSpend - need) : 0,
-          room, rmd, fromRmd, fromTaxable, fromTrad, fromRoth, fromIraSpend, from401Spend,
+          room, bracketRoom, irmaaCap, rmd, fromRmd, fromTaxable, fromTrad, fromRoth, fromIraSpend, from401Spend,
           shortfall: need, magi, irmaa: irmaa.label, notes, spendingActive, canPenaltyFree
         });
       }
@@ -3267,14 +3364,16 @@ VTI,50,240.00,13250.00,Capital One Investing`
         balNo, firstRmdNo, rmdTaxNo,
         effG, equityPct, tradStart, iraStart, k401Start,
         taxableStart: buckets['Taxable / other'] || 0,
-        rothStart: buckets['Roth'] || 0
+        rothStart: buckets['Roth'] || 0,
+        targetRate, bracketTop, avoidIrmaa
       };
     }
 
     function renderRoth() {
       const { buckets, trad, equityPct } = retirementBuckets();
       const s = loadRothSettings();
-      const plan = buildRothPlan(s, buckets, equityPct);
+      // Auto-pick avoid-IRMAA vs full-bracket by estimated all-in cost
+      const plan = chooseBestRothPlan(s, buckets, equityPct);
       const rmdAge = rmdAgeForBirthYear(s.birthYear);
       const filing = s.filing || 'mfj';
       const irmaaList = (IRMAA_TIERS[filing] || IRMAA_TIERS.mfj);
@@ -3319,9 +3418,9 @@ VTI,50,240.00,13250.00,Capital One Investing`
             </label>
             <label class="text-slate-400">Fill up to bracket
               <select id="rothBracket" class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300">
-                <option value="0.12" ${Number(s.targetBracket) === 0.12 ? 'selected' : ''}>12%</option>
-                <option value="0.22" ${Number(s.targetBracket) === 0.22 ? 'selected' : ''}>22%</option>
-                <option value="0.24" ${Number(s.targetBracket) === 0.24 ? 'selected' : ''}>24%</option>
+                <option value="0.12" ${Math.abs(Number(s.targetBracket) - 0.12) < 0.001 ? 'selected' : ''}>12%</option>
+                <option value="0.22" ${Math.abs(Number(s.targetBracket) - 0.22) < 0.001 ? 'selected' : ''}>22%</option>
+                <option value="0.24" ${Math.abs(Number(s.targetBracket) - 0.24) < 0.001 ? 'selected' : ''}>24%</option>
               </select>
             </label>
             <label class="text-slate-400">Expected growth %
@@ -3340,7 +3439,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
           <p class="text-[10px] text-slate-500 mt-2 leading-snug">
             RMD age (SECURE 2.0):
             ${rmdAge ? `<span class="text-emerald-300 font-semibold">${rmdAge}</span> (born ${s.birthYear})` : '— enter birth year'}.
-            Spending order after ${s.spendStartAge}: RMD → taxable → IRA/401k → Roth.
+            ${(!plan.error && plan.bracketTop != null) ? `Bracket top ≈ <span class="text-sky-300">${fmtMoney(plan.bracketTop)}</span>.` : ''}
+            IRMAA vs full-bracket is <strong class="text-slate-300">chosen automatically</strong> (see recommendation below).
           </p>
         </div>
 
@@ -3413,14 +3513,40 @@ VTI,50,240.00,13250.00,Capital One Investing`
           <div class="metric"><div class="label">Tax+penalty ≈</div><div class="value text-rose-300">${fmtMoney(plan.totalTax)}</div></div>
         </div>
 
+        <div class="card p-3 mb-3 border border-emerald-800/50">
+          <h3 class="text-sm font-semibold text-emerald-200 mb-1">Recommended strategy</h3>
+          <p class="text-xs text-slate-300 mb-2">
+            ${plan.avoidIrmaa
+              ? '<strong class="text-amber-200">Avoid IRMAA</strong> — cap conversions under the current Medicare IRMAA line.'
+              : '<strong class="text-sky-200">Full bracket</strong> — use the full tax-bracket room even if it may trigger IRMAA.'}
+          </p>
+          <p class="text-[11px] text-slate-400 leading-snug mb-2">${plan.strategyReason || ''}</p>
+          ${plan.alt ? `
+          <div class="text-[11px] space-y-1 border-t border-slate-700 pt-2">
+            <div class="flex justify-between"><span class="text-slate-500">This plan convert ≈</span><span class="text-emerald-300">${fmtMoney(plan.totalConverted)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">This plan tax ≈</span><span class="text-rose-300">${fmtMoney(plan.totalTax)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">Est. IRMAA premiums ≈</span><span class="text-amber-300">${fmtMoney(plan.score?.irmaaCost || 0)}</span></div>
+            <div class="flex justify-between border-t border-slate-700 pt-1 mt-1"><span class="text-slate-500">Alt (${plan.alt.avoidIrmaa ? 'avoid IRMAA' : 'full bracket'}) convert ≈</span><span class="text-slate-300">${fmtMoney(plan.alt.totalConverted)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">Alt tax ≈</span><span class="text-slate-300">${fmtMoney(plan.alt.totalTax)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-500">Alt est. IRMAA ≈</span><span class="text-slate-300">${fmtMoney(plan.alt.score?.irmaaCost || 0)}</span></div>
+          </div>` : ''}
+          <p class="text-[10px] text-slate-500 mt-2">Compares conversion tax + rough IRMAA surcharges + first RMD tax, with credit for dollars moved to Roth. Not a full Medicare projection.</p>
+        </div>
+
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold text-slate-300 mb-1">Conversion + tax flags</h3>
-          <p class="text-[10px] text-slate-500 mb-2">Conversions stop before RMD year; room is reduced to avoid the next IRMAA cliff when practical.</p>
+          <p class="text-[10px] text-slate-500 mb-2">
+            Filling through the <strong class="text-slate-300">${Math.round((plan.targetRate || 0) * 100)}%</strong> bracket
+            (top ≈ ${fmtMoney(plan.bracketTop || 0)}).
+            Strategy: <strong class="text-slate-300">${plan.avoidIrmaa ? 'IRMAA-aware cap' : 'full bracket room'}</strong>.
+            Conversions stop before the first RMD year.
+          </p>
           <div class="scroll-x max-h-72 overflow-y-auto">
             <table class="w-full text-left text-[11px]">
               <thead><tr class="text-slate-400">
                 <th class="py-1 pr-1">Yr</th>
                 <th class="py-1 pr-1">Age</th>
+                <th class="py-1 pr-1 text-right">Room</th>
                 <th class="py-1 pr-1 text-right">Convert</th>
                 <th class="py-1 pr-1 text-right">Tax≈</th>
                 <th class="py-1">Flags</th>
@@ -3430,6 +3556,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
                   <tr class="border-t border-slate-700">
                     <td class="py-1 pr-1 text-slate-300">${r.year}</td>
                     <td class="py-1 pr-1 text-slate-400">${r.age}</td>
+                    <td class="py-1 pr-1 text-right text-slate-400">${r.room != null ? fmtMoney(r.room) : '—'}</td>
                     <td class="py-1 pr-1 text-right text-emerald-300">${r.convert ? fmtMoney(r.convert) : '—'}</td>
                     <td class="py-1 pr-1 text-right text-rose-300">${r.tax ? fmtMoney(r.tax) : '—'}</td>
                     <td class="py-1 text-[10px] ${r.notes.length ? 'text-amber-300' : 'text-slate-600'}">${r.notes.join(' · ') || 'ok'}</td>
@@ -3515,25 +3642,35 @@ VTI,50,240.00,13250.00,Capital One Investing`
       wireRothForm();
     }
 
+    function collectRothSettingsFromForm() {
+      const brRaw = document.getElementById('rothBracket')?.value;
+      const br = parseFloat(brRaw);
+      return {
+        birthYear: parseInt(document.getElementById('rothBirth')?.value, 10) || 1972,
+        filing: document.getElementById('rothFiling')?.value || 'mfj',
+        otherIncome: parseFloat(document.getElementById('rothIncome')?.value) || 0,
+        ssIncome: parseFloat(document.getElementById('rothSS')?.value) || 0,
+        annualSpend: parseFloat(document.getElementById('rothSpend')?.value) || 0,
+        spendStartAge: parseInt(document.getElementById('rothSpendAge')?.value, 10) || 60,
+        targetBracket: (!isNaN(br) && br > 0) ? br : 0.22,
+        growth: parseFloat(document.getElementById('rothGrowth')?.value) || 6,
+        stateTax: parseFloat(document.getElementById('rothState')?.value) || 0
+      };
+    }
+
     function wireRothForm() {
-      const btn = document.getElementById('btnRothRecalc');
-      if (!btn) return;
-      btn.onclick = () => {
-        const s = {
-          birthYear: parseInt(document.getElementById('rothBirth')?.value, 10) || 1972,
-          filing: document.getElementById('rothFiling')?.value || 'mfj',
-          otherIncome: parseFloat(document.getElementById('rothIncome')?.value) || 0,
-          ssIncome: parseFloat(document.getElementById('rothSS')?.value) || 0,
-          annualSpend: parseFloat(document.getElementById('rothSpend')?.value) || 0,
-          spendStartAge: parseInt(document.getElementById('rothSpendAge')?.value, 10) || 60,
-          targetBracket: parseFloat(document.getElementById('rothBracket')?.value) || 0.22,
-          growth: parseFloat(document.getElementById('rothGrowth')?.value) || 6,
-          stateTax: parseFloat(document.getElementById('rothState')?.value) || 0
-        };
+      const apply = () => {
+        const s = collectRothSettingsFromForm();
         saveRothSettings(s);
         renderRoth();
-        toast('Roth plan updated');
+        toast('Roth plan updated · ' + Math.round(s.targetBracket * 100) + '% bracket');
       };
+      const btn = document.getElementById('btnRothRecalc');
+      if (btn) btn.onclick = apply;
+      const br = document.getElementById('rothBracket');
+      if (br) br.onchange = apply;
+      const filing = document.getElementById('rothFiling');
+      if (filing) filing.onchange = apply;
     }
 
     function showTab(name) {
