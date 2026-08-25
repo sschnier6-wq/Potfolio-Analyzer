@@ -31,7 +31,7 @@
     .metric { background: #1e293b; border-radius: 0.75rem; padding: 0.85rem 0.75rem; text-align: center; border: 1px solid #334155; }
     .metric .label { font-size: 0.7rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; }
     .metric .value { font-size: 1.15rem; font-weight: 700; margin-top: 0.15rem; }
-    .tab-btn { flex: 1; padding: 0.65rem 0.2rem; font-size: 0.72rem; font-weight: 600; color: #94a3b8; border-bottom: 2px solid transparent; white-space: nowrap; }
+    .tab-btn { flex: 1; padding: 0.6rem 0.12rem; font-size: 0.65rem; font-weight: 600; color: #94a3b8; border-bottom: 2px solid transparent; white-space: nowrap; }
     .tab-btn.active { color: #38bdf8; border-bottom-color: #38bdf8; }
     .loss { color: #f87171; }
     .gain { color: #4ade80; }
@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v51</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v53</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -135,6 +135,7 @@
         <button class="tab-btn" data-tab="positions">Positions</button>
         <button class="tab-btn" data-tab="overlap">Look-thru</button>
         <button class="tab-btn" data-tab="optimize">Optimize</button>
+        <button class="tab-btn" data-tab="budget">Budget</button>
         <button class="tab-btn" data-tab="roth">Roth</button>
       </div>
 
@@ -143,6 +144,7 @@
       <div id="panel-positions" class="tab-panel hidden"></div>
       <div id="panel-overlap" class="tab-panel hidden"></div>
       <div id="panel-optimize" class="tab-panel hidden"></div>
+      <div id="panel-budget" class="tab-panel hidden"></div>
       <div id="panel-roth" class="tab-panel hidden"></div>
     </section>
   </main>
@@ -1734,6 +1736,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
         $('#panel-positions').innerHTML = '';
         $('#panel-overlap').innerHTML = '';
         $('#panel-optimize').innerHTML = '';
+        const pb = document.getElementById('panel-budget');
+        if (pb) pb.innerHTML = '';
         const pr = document.getElementById('panel-roth');
         if (pr) pr.innerHTML = '';
         showTab(currentTab);
@@ -1744,6 +1748,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       renderPositions();
       renderOverlap();
       renderOptimize();
+      renderBudget();
       renderRoth();
       showTab(currentTab);
     }
@@ -2084,12 +2089,15 @@ VTI,50,240.00,13250.00,Capital One Investing`
         asOf: [...asOfDates].filter(Boolean).slice(0, 3).join(', ') || 'prior close'
       };
       try { saveState(); } catch (_) {}
+      // Force Budget tab guardrails to re-run on latest market values
+      budgetForceReview = true;
       renderAll();
       toast(
         (updated ? `Updated ${updated} item(s)` : 'No stock updates') +
         (failed ? `, ${failed} failed` : '') +
         annuityMsg +
-        homeMsg
+        homeMsg +
+        ' · budget refreshed'
       );
       if (btn) {
         btn.disabled = false;
@@ -3681,7 +3689,315 @@ VTI,50,240.00,13250.00,Capital One Investing`
       if (panel) panel.classList.remove('hidden');
       // re-render charts / planners if needed
       if (name === 'overview' && holdings.length) renderOverview();
+      if (name === 'budget' && holdings.length) renderBudget();
       if (name === 'roth' && holdings.length) renderRoth();
+    }
+
+    // ——— Monthly budget / Guyton–Klinger-style guardrails ———
+    function portfolioEquityMix() {
+      let eq = 0, total = 0;
+      viewHoldings().forEach(p => {
+        const v = p.market_value || 0;
+        if (v <= 0) return;
+        total += v;
+        const style = classifyEquityStyle(p);
+        if (!/Bonds|Cash|Annuities/i.test(style)) eq += v;
+      });
+      return total > 0 ? eq / total : 0.7;
+    }
+
+    function riskProfileFromEquity(eqPct) {
+      if (eqPct < 0.40) return { key: 'conservative', label: 'Conservative', baseRate: 0.035, desc: '<40% equity' };
+      if (eqPct < 0.70) return { key: 'moderate', label: 'Moderate', baseRate: 0.040, desc: '40–70% equity' };
+      return { key: 'aggressive', label: 'Growth-oriented', baseRate: 0.045, desc: '>70% equity' };
+    }
+
+    let budgetForceReview = false; // set true after price / portfolio refresh
+
+    function loadBudgetSettings() {
+      try {
+        const raw = localStorage.getItem('portfolio_budget_v1');
+        if (raw) return Object.assign({
+          annualSpend: null,
+          initialPortfolio: null,
+          initialRate: null,
+          lastReviewYm: null,
+          lastPortfolio: null,
+          lastReviewAt: null,
+          inflation: 2.5,
+          includeHome: false,
+          history: []
+        }, JSON.parse(raw));
+      } catch (_) {}
+      return {
+        annualSpend: null,
+        initialPortfolio: null,
+        initialRate: null,
+        lastReviewYm: null,
+        lastPortfolio: null,
+        lastReviewAt: null,
+        inflation: 2.5,
+        includeHome: false,
+        history: []
+      };
+    }
+
+    function saveBudgetSettings(s) {
+      try { localStorage.setItem('portfolio_budget_v1', JSON.stringify(s)); } catch (_) {}
+    }
+
+    function ymKey(d) {
+      return d.getFullYear() * 100 + (d.getMonth() + 1);
+    }
+
+    function applyGuardrails(settings, portfolioNow, profile, opts) {
+      opts = opts || {};
+      const now = new Date();
+      const ym = ymKey(now);
+      let annual = settings.annualSpend;
+      let initialPort = settings.initialPortfolio;
+      let initialRate = settings.initialRate;
+      const history = Array.isArray(settings.history) ? settings.history.slice() : [];
+      const actions = [];
+
+      // Bootstrap
+      if (!annual || !initialPort || annual <= 0 || initialPort <= 0) {
+        initialPort = portfolioNow;
+        initialRate = profile.baseRate;
+        annual = portfolioNow * profile.baseRate;
+        actions.push(`Started guardrails at ${(profile.baseRate * 100).toFixed(1)}% of portfolio (${profile.label}).`);
+      }
+
+      const lastPort = settings.lastPortfolio || initialPort;
+      const infl = (parseFloat(settings.inflation) || 2.5) / 100;
+      const perf = lastPort > 0 ? (portfolioNow - lastPort) / lastPort : 0;
+      const portMoved = lastPort > 0 && Math.abs(perf) >= 0.003; // ≥0.3% change
+      const force = !!(opts.force || budgetForceReview);
+      // Re-evaluate whenever market/portfolio was refreshed or value moved enough
+      const shouldReview = force || portMoved || !settings.lastReviewAt;
+
+      let didAdjust = false;
+
+      if (shouldReview && lastPort > 0) {
+        // Market performance signal since last stored portfolio level
+        if (perf <= -0.10) {
+          annual = annual * 0.95;
+          actions.push(`Portfolio −${(Math.abs(perf) * 100).toFixed(1)}% since last check → −5% spend (market caution).`);
+          didAdjust = true;
+        } else if (perf >= 0.12) {
+          annual = annual * 1.05;
+          actions.push(`Portfolio +${(perf * 100).toFixed(1)}% since last check → +5% spend (prosperity).`);
+          didAdjust = true;
+        }
+
+        // Guyton–Klinger rate guardrails vs current portfolio
+        const currentRate = annual / portfolioNow;
+        const upper = profile.baseRate * 1.20;
+        const lower = profile.baseRate * 0.80;
+        if (currentRate > upper) {
+          const before = annual;
+          annual = portfolioNow * profile.baseRate;
+          actions.push(`Withdrawal rate ${(currentRate * 100).toFixed(1)}% above upper guardrail → reset toward ${(profile.baseRate * 100).toFixed(1)}% (was ${fmtMoney(before)}/yr).`);
+          didAdjust = true;
+        } else if (currentRate < lower && portfolioNow > lastPort) {
+          annual = Math.min(annual * 1.10, portfolioNow * profile.baseRate * 1.10);
+          actions.push(`Withdrawal rate ${(currentRate * 100).toFixed(1)}% below lower guardrail with rising markets → +10% spend.`);
+          didAdjust = true;
+        }
+
+        // January inflation raise once per year if markets not down hard
+        const lastJanKey = settings.lastInflationYear;
+        if (!didAdjust && perf > -0.05 && now.getMonth() === 0 && lastJanKey !== now.getFullYear()) {
+          annual = annual * (1 + infl);
+          actions.push(`January inflation raise +${(infl * 100).toFixed(1)}%.`);
+          didAdjust = true;
+          settings = Object.assign({}, settings, { lastInflationYear: now.getFullYear() });
+        }
+
+        if (force && !didAdjust) {
+          actions.push('Recalculated after market / portfolio refresh — within guardrails, spend rate held.');
+        } else if (portMoved && !didAdjust) {
+          actions.push(`Portfolio ${perf >= 0 ? '+' : ''}${(perf * 100).toFixed(2)}% since last check — within guardrails.`);
+        }
+      }
+
+      if (!actions.length) {
+        actions.push('Within guardrails — monthly amount based on current portfolio.');
+      }
+
+      // Always keep spending rate sensible vs live portfolio (soft floor/ceiling display sync)
+      // Do not auto-reset every tick — only rails above. Monthly = annual/12.
+      const monthly = annual / 12;
+      const months = [];
+      for (let i = 0; i < 12; i++) {
+        const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
+        months.push({
+          label: d.toLocaleString('en-US', { month: 'short', year: 'numeric' }),
+          amount: monthly,
+          isCurrent: i === 0
+        });
+      }
+
+      const nextSettings = {
+        annualSpend: annual,
+        initialPortfolio: initialPort,
+        initialRate: initialRate || profile.baseRate,
+        lastReviewYm: ym,
+        lastReviewAt: now.toISOString(),
+        lastPortfolio: portfolioNow,
+        lastInflationYear: settings.lastInflationYear || null,
+        inflation: settings.inflation,
+        includeHome: !!settings.includeHome,
+        history: (shouldReview
+          ? history.concat([{
+              at: now.toISOString(), ym, portfolio: portfolioNow, annual, monthly, actions: actions.slice(), force: !!force
+            }])
+          : history
+        ).slice(-48)
+      };
+
+      return {
+        annual, monthly, portfolioNow, profile,
+        currentRate: portfolioNow > 0 ? annual / portfolioNow : 0,
+        upperRate: profile.baseRate * 1.20,
+        lowerRate: profile.baseRate * 0.80,
+        actions, months, nextSettings,
+        perfVsLast: perf,
+        reviewed: shouldReview
+      };
+    }
+
+    function renderBudget() {
+      const data = viewHoldings();
+      const invTotal = data.reduce((s, p) => s + (p.market_value || 0), 0);
+      const s0 = loadBudgetSettings();
+      const portfolioNow = s0.includeHome ? invTotal + totalHomeValue() : invTotal;
+      const eqPct = portfolioEquityMix();
+      const profile = riskProfileFromEquity(eqPct);
+
+      if (portfolioNow <= 0) {
+        $('#panel-budget').innerHTML = `<div class="card p-4 text-center text-slate-400 text-sm">Load portfolio files to estimate a safe monthly spend.</div>`;
+        return;
+      }
+
+      const forced = budgetForceReview;
+      const g = applyGuardrails(s0, portfolioNow, profile, { force: forced });
+      budgetForceReview = false;
+      // Always persist latest portfolio level so the next refresh can measure performance
+      saveBudgetSettings(g.nextSettings);
+
+      const html = `
+        <div class="card p-3 mb-3 text-xs text-slate-400 leading-relaxed">
+          <strong class="text-slate-300">Guardrails spending</strong> (Guyton–Klinger style):
+          risk-based withdrawal rate, then raise or cut when markets move enough to hit the rails.
+          <strong class="text-slate-300">Recalculates whenever you refresh prices</strong> or portfolio values change
+          (Overview → Refresh prices), and when you open this tab after a material move.
+          <span class="text-amber-300/90">Not financial advice</span>.
+        </div>
+
+        <div class="grid grid-cols-2 gap-2 mb-3">
+          <div class="metric col-span-2">
+            <div class="label">Safe spend · this month</div>
+            <div class="value text-emerald-300 text-2xl">${fmtMoney(g.monthly)}</div>
+            <div class="text-[11px] text-slate-500 mt-1">${fmtMoney(g.annual)} / year · ${(g.currentRate * 100).toFixed(2)}% of portfolio</div>
+          </div>
+          <div class="metric"><div class="label">Portfolio base</div><div class="value text-sky-300">${fmtMoney(g.portfolioNow)}</div></div>
+          <div class="metric"><div class="label">Risk profile</div><div class="value text-amber-200 text-sm">${g.profile.label}</div></div>
+        </div>
+
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold text-slate-300 mb-2">How this month was set</h3>
+          <div class="space-y-1 text-xs text-slate-400">
+            <div class="flex justify-between"><span>Equity mix (investments)</span><span class="text-slate-200">${fmt(eqPct * 100, 0)}% · ${g.profile.desc}</span></div>
+            <div class="flex justify-between"><span>Base withdrawal rate</span><span class="text-slate-200">${(g.profile.baseRate * 100).toFixed(1)}%</span></div>
+            <div class="flex justify-between"><span>Upper / lower rails</span><span class="text-slate-200">${(g.upperRate * 100).toFixed(1)}% / ${(g.lowerRate * 100).toFixed(1)}%</span></div>
+            <div class="flex justify-between"><span>vs last review</span><span class="${g.perfVsLast >= 0 ? 'text-emerald-300' : 'text-rose-300'}">${g.perfVsLast >= 0 ? '+' : ''}${(g.perfVsLast * 100).toFixed(1)}%</span></div>
+          </div>
+          <ul class="mt-2 text-[11px] text-slate-400 list-disc pl-4 space-y-1">
+            ${g.actions.map(a => `<li>${a}</li>`).join('')}
+          </ul>
+        </div>
+
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold text-slate-300 mb-1">Next 12 months</h3>
+          <p class="text-[10px] text-slate-500 mb-2">Same monthly amount until the next monthly guardrail check (or January inflation raise).</p>
+          <div class="space-y-1">
+            ${g.months.map(m => `
+              <div class="flex justify-between text-xs ${m.isCurrent ? 'text-emerald-300 font-semibold' : 'text-slate-400'}">
+                <span>${m.label}${m.isCurrent ? ' · now' : ''}</span>
+                <span>${fmtMoney(m.amount)}</span>
+              </div>`).join('')}
+          </div>
+        </div>
+
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold text-slate-300 mb-2">Settings</h3>
+          <label class="flex items-center gap-2 text-xs text-slate-400 mb-2">
+            <input type="checkbox" id="budgetIncludeHome" ${s0.includeHome ? 'checked' : ''} />
+            Include home value in portfolio base (usually leave off)
+          </label>
+          <label class="text-xs text-slate-400 block mb-2">Inflation assumption %
+            <input id="budgetInflation" type="number" step="0.1" min="0" max="10" value="${s0.inflation ?? 2.5}"
+              class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+          </label>
+          <label class="text-xs text-slate-400 block mb-2">Override annual spend $ (blank = guardrails)
+            <input id="budgetAnnualOverride" type="number" step="1000" min="0" placeholder="${Math.round(g.annual)}"
+              class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300" />
+          </label>
+          <div class="grid grid-cols-2 gap-2 mt-2">
+            <button type="button" id="btnBudgetApply"
+              class="text-sm font-semibold bg-sky-600 hover:bg-sky-500 text-white rounded-lg py-2">Apply</button>
+            <button type="button" id="btnBudgetReset"
+              class="text-sm font-semibold border border-slate-600 text-slate-300 rounded-lg py-2">Reset rails</button>
+          </div>
+        </div>
+
+        <div class="card p-3 text-[11px] text-slate-500 leading-relaxed mb-2">
+          <strong class="text-slate-400">Rules used:</strong>
+          Base rate from equity mix (3.5% / 4.0% / 4.5%).
+          If portfolio jumps ≥12% since last review → +5% spend; drops ≥10% → −5%.
+          If withdrawal rate exceeds ±20% of the base rate vs current portfolio → adjust toward the base (Guyton–Klinger decision rules).
+          Optional January inflation raise. Refresh prices on Overview for a fresher portfolio level.
+        </div>
+      `;
+      $('#panel-budget').innerHTML = html;
+
+      const applyBtn = document.getElementById('btnBudgetApply');
+      if (applyBtn) applyBtn.onclick = () => {
+        const cur = loadBudgetSettings();
+        cur.includeHome = !!document.getElementById('budgetIncludeHome')?.checked;
+        cur.inflation = parseFloat(document.getElementById('budgetInflation')?.value) || 2.5;
+        const ovr = parseFloat(document.getElementById('budgetAnnualOverride')?.value);
+        if (!isNaN(ovr) && ovr > 0) {
+          cur.annualSpend = ovr;
+          cur.lastReviewYm = ymKey(new Date());
+          const inv = viewHoldings().reduce((s, p) => s + (p.market_value || 0), 0);
+          cur.lastPortfolio = cur.includeHome ? inv + totalHomeValue() : inv;
+          if (!cur.initialPortfolio) cur.initialPortfolio = cur.lastPortfolio;
+          if (!cur.initialRate) cur.initialRate = profile.baseRate;
+          saveBudgetSettings(cur);
+        } else {
+          saveBudgetSettings(cur);
+        }
+        renderBudget();
+        toast('Budget updated');
+      };
+      const resetBtn = document.getElementById('btnBudgetReset');
+      if (resetBtn) resetBtn.onclick = () => {
+        if (!confirm('Reset guardrails and re-start from current portfolio × base rate?')) return;
+        saveBudgetSettings({
+          annualSpend: null,
+          initialPortfolio: null,
+          initialRate: null,
+          lastReviewYm: null,
+          lastPortfolio: null,
+          inflation: parseFloat(document.getElementById('budgetInflation')?.value) || 2.5,
+          includeHome: !!document.getElementById('budgetIncludeHome')?.checked,
+          history: []
+        });
+        renderBudget();
+        toast('Guardrails reset');
+      };
     }
 
     // ========== Persistence ==========
