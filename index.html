@@ -51,7 +51,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v53</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v54</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -3796,12 +3796,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
         const lower = profile.baseRate * 0.80;
         if (currentRate > upper) {
           const before = annual;
+          // Cut toward base rate (not all the way to lower rail)
           annual = portfolioNow * profile.baseRate;
-          actions.push(`Withdrawal rate ${(currentRate * 100).toFixed(1)}% above upper guardrail → reset toward ${(profile.baseRate * 100).toFixed(1)}% (was ${fmtMoney(before)}/yr).`);
+          actions.push(`Withdrawal rate ${(currentRate * 100).toFixed(1)}% above upper rail (${(upper * 100).toFixed(1)}%) → cut toward base ${(profile.baseRate * 100).toFixed(1)}% (was ${fmtMoney(before)}/yr).`);
           didAdjust = true;
-        } else if (currentRate < lower && portfolioNow > lastPort) {
-          annual = Math.min(annual * 1.10, portfolioNow * profile.baseRate * 1.10);
-          actions.push(`Withdrawal rate ${(currentRate * 100).toFixed(1)}% below lower guardrail with rising markets → +10% spend.`);
+        } else if (currentRate < lower) {
+          // Below lower rail: raise at least to the lower rail (minimum safe band)
+          const before = annual;
+          const floorAnnual = portfolioNow * lower;
+          const target = Math.max(floorAnnual, Math.min(annual * 1.10, portfolioNow * profile.baseRate));
+          annual = Math.max(annual, target);
+          if (annual < floorAnnual) annual = floorAnnual;
+          actions.push(`Withdrawal rate ${(currentRate * 100).toFixed(1)}% below lower rail (${(lower * 100).toFixed(1)}%) → raise spend to at least ${fmtMoney(annual)}/yr (${((annual / portfolioNow) * 100).toFixed(1)}%).`);
           didAdjust = true;
         }
 
@@ -3825,15 +3831,32 @@ VTI,50,240.00,13250.00,Capital One Investing`
         actions.push('Within guardrails — monthly amount based on current portfolio.');
       }
 
-      // Always keep spending rate sensible vs live portfolio (soft floor/ceiling display sync)
-      // Do not auto-reset every tick — only rails above. Monthly = annual/12.
+      // Clamp recommended annual into the rail band if still outside after rules
+      const upper = profile.baseRate * 1.20;
+      const lower = profile.baseRate * 0.80;
+      const minAnnual = portfolioNow * lower;
+      const maxAnnual = portfolioNow * upper;
+      const baseAnnual = portfolioNow * profile.baseRate;
+      if (annual < minAnnual) {
+        annual = minAnnual;
+        actions.push(`Clamped up to lower rail ${(lower * 100).toFixed(1)}% → ${fmtMoney(annual)}/yr.`);
+      } else if (annual > maxAnnual) {
+        annual = maxAnnual;
+        actions.push(`Clamped down to upper rail ${(upper * 100).toFixed(1)}% → ${fmtMoney(annual)}/yr.`);
+      }
+
       const monthly = annual / 12;
+      const monthlyMin = minAnnual / 12;
+      const monthlyMax = maxAnnual / 12;
+      const monthlyBase = baseAnnual / 12;
       const months = [];
       for (let i = 0; i < 12; i++) {
         const d = new Date(now.getFullYear(), now.getMonth() + i, 1);
         months.push({
           label: d.toLocaleString('en-US', { month: 'short', year: 'numeric' }),
           amount: monthly,
+          min: monthlyMin,
+          max: monthlyMax,
           isCurrent: i === 0
         });
       }
@@ -3857,10 +3880,12 @@ VTI,50,240.00,13250.00,Capital One Investing`
       };
 
       return {
-        annual, monthly, portfolioNow, profile,
+        annual, monthly, monthlyMin, monthlyMax, monthlyBase,
+        minAnnual, maxAnnual, baseAnnual,
+        portfolioNow, profile,
         currentRate: portfolioNow > 0 ? annual / portfolioNow : 0,
-        upperRate: profile.baseRate * 1.20,
-        lowerRate: profile.baseRate * 0.80,
+        upperRate: upper,
+        lowerRate: lower,
         actions, months, nextSettings,
         perfVsLast: perf,
         reviewed: shouldReview
@@ -3897,9 +3922,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
         <div class="grid grid-cols-2 gap-2 mb-3">
           <div class="metric col-span-2">
-            <div class="label">Safe spend · this month</div>
-            <div class="value text-emerald-300 text-2xl">${fmtMoney(g.monthly)}</div>
-            <div class="text-[11px] text-slate-500 mt-1">${fmtMoney(g.annual)} / year · ${(g.currentRate * 100).toFixed(2)}% of portfolio</div>
+            <div class="label">Safe spend range · this month</div>
+            <div class="value text-emerald-300 text-xl leading-snug">
+              ${fmtMoney(g.monthlyMin)} – ${fmtMoney(g.monthlyMax)}
+            </div>
+            <div class="text-[11px] text-slate-400 mt-1">
+              Lower rail ${(g.lowerRate * 100).toFixed(1)}% → upper rail ${(g.upperRate * 100).toFixed(1)}% of portfolio
+            </div>
+            <div class="mt-2 pt-2 border-t border-slate-700">
+              <div class="text-[10px] text-slate-500 uppercase tracking-wide">Recommended (inside rails)</div>
+              <div class="text-lg font-semibold text-sky-300">${fmtMoney(g.monthly)}/mo</div>
+              <div class="text-[11px] text-slate-500">${fmtMoney(g.annual)}/yr · ${(g.currentRate * 100).toFixed(2)}% of portfolio · base ${(g.profile.baseRate * 100).toFixed(1)}% would be ${fmtMoney(g.monthlyBase)}/mo</div>
+            </div>
           </div>
           <div class="metric"><div class="label">Portfolio base</div><div class="value text-sky-300">${fmtMoney(g.portfolioNow)}</div></div>
           <div class="metric"><div class="label">Risk profile</div><div class="value text-amber-200 text-sm">${g.profile.label}</div></div>
@@ -3910,7 +3944,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
           <div class="space-y-1 text-xs text-slate-400">
             <div class="flex justify-between"><span>Equity mix (investments)</span><span class="text-slate-200">${fmt(eqPct * 100, 0)}% · ${g.profile.desc}</span></div>
             <div class="flex justify-between"><span>Base withdrawal rate</span><span class="text-slate-200">${(g.profile.baseRate * 100).toFixed(1)}%</span></div>
-            <div class="flex justify-between"><span>Upper / lower rails</span><span class="text-slate-200">${(g.upperRate * 100).toFixed(1)}% / ${(g.lowerRate * 100).toFixed(1)}%</span></div>
+            <div class="flex justify-between"><span>Rail band (rate)</span><span class="text-slate-200">${(g.lowerRate * 100).toFixed(1)}% – ${(g.upperRate * 100).toFixed(1)}%</span></div>
+            <div class="flex justify-between"><span>Rail band ($/mo)</span><span class="text-slate-200">${fmtMoney(g.monthlyMin)} – ${fmtMoney(g.monthlyMax)}</span></div>
             <div class="flex justify-between"><span>vs last review</span><span class="${g.perfVsLast >= 0 ? 'text-emerald-300' : 'text-rose-300'}">${g.perfVsLast >= 0 ? '+' : ''}${(g.perfVsLast * 100).toFixed(1)}%</span></div>
           </div>
           <ul class="mt-2 text-[11px] text-slate-400 list-disc pl-4 space-y-1">
@@ -3920,12 +3955,15 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold text-slate-300 mb-1">Next 12 months</h3>
-          <p class="text-[10px] text-slate-500 mb-2">Same monthly amount until the next monthly guardrail check (or January inflation raise).</p>
+          <p class="text-[10px] text-slate-500 mb-2">Recommended is inside the rail range. Range moves when portfolio value changes.</p>
           <div class="space-y-1">
             ${g.months.map(m => `
-              <div class="flex justify-between text-xs ${m.isCurrent ? 'text-emerald-300 font-semibold' : 'text-slate-400'}">
-                <span>${m.label}${m.isCurrent ? ' · now' : ''}</span>
-                <span>${fmtMoney(m.amount)}</span>
+              <div class="flex justify-between text-xs ${m.isCurrent ? 'font-semibold' : ''}">
+                <span class="${m.isCurrent ? 'text-emerald-300' : 'text-slate-400'}">${m.label}${m.isCurrent ? ' · now' : ''}</span>
+                <span class="text-right">
+                  <span class="${m.isCurrent ? 'text-sky-300' : 'text-slate-300'}">${fmtMoney(m.amount)}</span>
+                  <span class="text-slate-500 text-[10px]"> (${fmtMoney(m.min)}–${fmtMoney(m.max)})</span>
+                </span>
               </div>`).join('')}
           </div>
         </div>
