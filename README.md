@@ -1,70 +1,95 @@
 # Portfolio Analyzer — Mobile Web App
 
-A fully **client-side** portfolio tool for iPhone Safari (and desktop browsers).  
-All processing happens in your browser. Your statements and balances **never leave your device**.
+Fully **client-side** portfolio tool for iPhone Safari (and desktop).  
+Statements and balances **never leave your device**.
 
-**Current version:** v49
+**Current version:** **v55**
 
 ---
 
 ## Quick start (iPhone)
 
-### Recommended: GitHub Pages
+### GitHub Pages
 
-1. Put these files in a public GitHub repo (same folder):
+1. Put these files in a public repo (same folder):
    - `index.html`
-   - `xlsx.min.js` (Excel support)
-   - `apple-touch-icon.png`, `favicon.png`, `icon-192.png` (optional home-screen icons)
-2. Enable **Settings → Pages → Deploy from branch** (root).
-3. Open: `https://YOUR-USER.github.io/YOUR-REPO/?v=49`
+   - `xlsx.min.js`
+   - `apple-touch-icon.png`, `favicon.png`, `icon-192.png` (home-screen icons)
+2. **Settings → Pages → Deploy from branch** (root).
+3. Open: `https://YOUR-USER.github.io/YOUR-REPO/?v=55`
 4. Safari → Share → **Add to Home Screen**.
 
-Use a `?v=49` (or newer) cache-buster after updates, or clear Website Data for the site.
+After updates, bump `?v=55` (or clear Website Data for the site).
 
 ### Privacy when sharing the link
 
-The public URL only serves the **app code**.  
-Positions, prices, home values, and Roth inputs live in **that browser’s `localStorage` only**.  
-Someone else opening the same link gets a blank app on their device.
+The URL only serves **app code**. Positions, prices, home values, Roth/Budget inputs live in **that browser’s `localStorage` only**. Another person opening the same link sees a blank app on *their* device.
 
 ---
 
-## What it does
+## Features (v55)
 
 ### Load accounts
-- Upload **multiple** CSV / Excel files from **Fidelity**, **E\*TRADE**, **RW Baird**, and similar brokers
-- Toggle which files are included with chips at the top
-- Kids’ / 529 Baird accounts can be excluded by account suffix
-- Data stays in the browser until you Clear
+- Multiple **CSV / Excel** files: **Fidelity**, **E\*TRADE**, **RW Baird**, similar brokers
+- Toggle files with chips; **All / None**
+- Exclude kids’ / 529 Baird accounts by suffix
+- Optional **Home valuation** (manual address + dollar value; include/exclude from totals)
 
 ### Overview
-- Live-ish valuation: **Refresh prices** uses Yahoo prior closes; annuities can scale with SPY
-- **Asset class mix** pie (equities, bonds, cash, annuities, real estate, …)
-- **Equity & style mix** pie (large blend/growth/value, mid/small, international, bonds, …)
-- Allocation by account, top holdings, holdings summary
-- Optional **Home valuation**: enter address/label + your own dollar value (no online lookup)
+- Metrics: investments, home, net-ish total, tickers / accounts
+- **Live-ish valuation**
+  - **↻ Refresh prices** button
+  - **Pull down from the top of the screen** (iPhone) to refresh prices
+  - Yahoo prior close via CORS-safe proxies (paced requests + retries)
+  - Cash / money markets @ $1
+  - Lincoln / Jackson index annuities scaled by **SPY** vs statement baseline
+  - Failed symbols listed when some tickers can’t be priced
+- **Asset class mix** pie + detail
+- **Equity / style mix** pie (growth, large, small, international, bonds, …)
+- Allocation by account, top holdings
 
 ### Positions
-- By ticker with latest price; tap price to toggle **$ vs %** change
+- By ticker; latest price; tap price for **$ ↔ %** change
 - Green / red vs prior refresh
 - Tap ticker → Yahoo Finance
 
 ### Look-thru
-- ETF / fund look-through (e.g. VOO, QQQ, QQQM, QQQJ) with weight heatmap
-- Overlap / concentration (**HHI**) and diversity commentary with suggested funds
+- ETF / fund holdings heatmap (VOO, QQQ, QQQM, QQQJ, …)
+- Overlap / **HHI** concentration + diversity commentary
 
 ### Optimize
-- Per-holding peer suggestions (expense ratio / risk role)
-- Research links: Yahoo, Morningstar, ETF.com
+- Peer / lower-cost alternatives with research links (Yahoo, Morningstar, ETF.com)
 
-### Roth (conversion + spending)
-- **Birth year** → RMD age under SECURE 2.0 (73 if born 1951–1959; **75** if 1960+)
-- Detects Traditional IRA, 401(k), Roth, and taxable balances from account names
-- Year-by-year **Roth conversion** plan filling a chosen federal bracket (12% / 22% / 24%)
-- **IRMAA** tier flags, **NIIT** risk notes, early-withdrawal penalty notes
-- **Annual spending** from a start age (default 60): draw order **RMD → taxable → IRA → 401(k) → Roth**
-- Spending schedule shows **spend, IRA balance, 401(k) balance, Roth balance, RMD** each year
-- First-RMD summary: balance and RMD **with plan vs no conversions**, plus estimated tax difference
+### Budget (left of Roth)
+- **Guyton–Klinger-style guardrails**
+- Base rate from equity mix: **3.5% / 4.0% / 4.5%**
+- **Safe spend range** this month (lower rail – upper rail) + recommended amount inside the band
+- Re-evaluates when you **refresh prices** or portfolio value moves
+- Optional inflation (January), include-home toggle, manual override, reset rails
+- Next-12-months schedule
+
+### Roth
+- Birth year → RMD age (SECURE 2.0: **75** if born 1960+)
+- Auto-detects Traditional IRA / 401(k) / Roth / taxable from account names
+- Year-by-year conversions to a chosen federal bracket
+- **Automatically compares avoid-IRMAA vs full-bracket** and picks the lower estimated all-in cost
+- IRMAA / NIIT notes; spending schedule (IRA / 401k / Roth balances + RMD)
+- First-RMD with-plan vs no-conversion summary
+
+---
+
+## Why price refresh was failing (and the fix)
+
+Browsers block direct Yahoo Finance calls (**CORS**). Older builds hit dead or rate-limited proxies (`corsproxy.io` keyless URLs, allorigins bursts with 4 parallel workers), so most symbols failed while a few succeeded.
+
+**v55 changes:**
+1. Try **direct Yahoo** (query1 / query2), then **allorigins `/get`** (parse `contents`), then **allorigins `/raw`**
+2. **Retry once** on transient failures
+3. **2 paced workers** (~120 ms between symbols) instead of a 4-wide blast
+4. List **failed tickers** under Live-ish valuation
+5. **Pull-to-refresh** from the top of the page on iPhone
+
+CUSIPs, internal `NON*` codes, and unmapped symbols still use **statement value** (not priced).
 
 ---
 
@@ -73,31 +98,13 @@ Someone else opening the same link gets a blank app on their device.
 | File | Required | Purpose |
 |------|----------|---------|
 | `index.html` | Yes | App |
-| `xlsx.min.js` | Yes | Excel (.xlsx) parsing |
-| `apple-touch-icon.png` | Recommended | iOS home-screen icon |
-| `favicon.png` / `icon-192.png` | Optional | Browser / PWA icons |
+| `xlsx.min.js` | Yes | Excel parsing |
+| `apple-touch-icon.png` | Recommended | iOS home screen |
+| `favicon.png` / `icon-192.png` | Optional | Icons |
 | `README.md` | Optional | This doc |
 
 ---
 
-## Broker tips
+## Local only
 
-- Prefer **CSV** exports when possible.
-- **Excel** works via the bundled SheetJS file (same origin as the page).
-- Account type for Roth planning is inferred from names (`IRA`, `Roth`, `401k`, `Rollover`, etc.). If detection looks wrong, check labels in the export.
-- Values and lots come from your statements; price refresh is best-effort (Yahoo chart API).
-
----
-
-## Privacy
-
-- No login, no backend, no analytics endpoint for your holdings.
-- `localStorage` keys are local to the origin (e.g. your github.io site).
-- Clearing Safari Website Data for the site wipes holdings and Roth settings on that device.
-
----
-
-## Disclaimer
-
-This tool is for **personal organization and planning sketches only**.  
-It is **not** tax, investment, or legal advice. Confirm conversions, RMDs, IRMAA, and withholding with a qualified advisor or CPA. Bracket and IRMAA figures are approximate and change with law and inflation.
+No server, no accounts, no analytics. Clear data anytime with **Clear**.

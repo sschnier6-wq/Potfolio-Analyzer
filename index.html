@@ -33,6 +33,20 @@
     .metric .value { font-size: 1.15rem; font-weight: 700; margin-top: 0.15rem; }
     .tab-btn { flex: 1; padding: 0.6rem 0.12rem; font-size: 0.65rem; font-weight: 600; color: #94a3b8; border-bottom: 2px solid transparent; white-space: nowrap; }
     .tab-btn.active { color: #38bdf8; border-bottom-color: #38bdf8; }
+    #pullRefreshHint {
+      position: fixed; left: 0; right: 0; top: 0; z-index: 60;
+      pointer-events: none; text-align: center;
+      padding-top: max(0.5rem, env(safe-area-inset-top, 0px));
+      transform: translateY(-120%);
+      transition: transform 0.15s ease-out, opacity 0.15s;
+      opacity: 0;
+    }
+    #pullRefreshHint.show { transform: translateY(0); opacity: 1; }
+    #pullRefreshHint .pill {
+      display: inline-block; background: #0ea5e9; color: #fff;
+      font-size: 0.75rem; font-weight: 600; border-radius: 999px;
+      padding: 0.4rem 0.9rem; box-shadow: 0 4px 14px rgba(14,165,233,0.35);
+    }
     .loss { color: #f87171; }
     .gain { color: #4ade80; }
     input, select, button { -webkit-appearance: none; appearance: none; }
@@ -45,13 +59,14 @@
   </style>
 </head>
 <body class="min-h-screen flex flex-col">
+  <div id="pullRefreshHint"><span class="pill">↓ Pull to refresh prices</span></div>
 
   <!-- Header -->
   <header class="sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-700 px-4 pb-3 safe-top">
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v54</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v55</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1769,76 +1784,116 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return false;
     }
 
+    function parseYahooChartPayload(data, t) {
+      const result = data?.chart?.result?.[0];
+      if (!result) throw new Error('no result');
+      const meta = result.meta || {};
+      const quotes = result.indicators?.quote?.[0];
+      const rawCloses = quotes?.close || [];
+      const ts = result.timestamp || [];
+      const pairs = [];
+      for (let i = 0; i < rawCloses.length; i++) {
+        if (rawCloses[i] != null && !isNaN(rawCloses[i])) pairs.push({ c: Number(rawCloses[i]), t: ts[i] });
+      }
+      let price = null;
+      let dayPrev = null;
+      let asOf = '';
+      if (pairs.length >= 1) {
+        const last = pairs[pairs.length - 1];
+        const lastDate = last.t ? new Date(last.t * 1000) : null;
+        const isSameDay = lastDate && lastDate.toDateString() === new Date().toDateString();
+        let idx = pairs.length - 1;
+        if (isSameDay && pairs.length >= 2) idx = pairs.length - 2;
+        price = pairs[idx].c;
+        asOf = pairs[idx].t ? new Date(pairs[idx].t * 1000).toLocaleDateString() : '';
+        if (idx >= 1) dayPrev = pairs[idx - 1].c;
+      }
+      if (price == null || isNaN(price)) {
+        price = meta.regularMarketPrice || meta.chartPreviousClose || meta.previousClose;
+        asOf = asOf || 'prior close';
+      }
+      if (dayPrev == null) {
+        const cp = meta.chartPreviousClose || meta.previousClose;
+        if (cp != null && Math.abs(Number(cp) - Number(price)) > 0.0001) dayPrev = Number(cp);
+      }
+      if (meta.instrumentType === 'MUTUALFUND' || /^[A-Z]{5}$/.test(t)) {
+        const mf = meta.regularMarketPrice ?? meta.previousClose;
+        if (mf != null && !isNaN(mf) && mf > 0) {
+          price = Number(mf);
+          const cp = meta.chartPreviousClose ?? meta.previousClose;
+          if (cp != null && Math.abs(Number(cp) - price) > 0.0001) dayPrev = Number(cp);
+        }
+      }
+      if (price == null || isNaN(price) || price <= 0) throw new Error('no price');
+      return { price: Number(price), dayPrev, asOf, meta };
+    }
+
+    async function fetchYahooJson(symbol) {
+      const t = encodeURIComponent(symbol);
+      const paths = [
+        `https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=10d`,
+        `https://query2.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=10d`,
+      ];
+      let lastErr = null;
+      for (const yahoo of paths) {
+        // 1) Direct (works in some browsers / WebViews)
+        try {
+          const res = await fetch(yahoo, {
+            cache: 'no-store',
+            mode: 'cors',
+            headers: { Accept: 'application/json' }
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.chart?.result?.[0]) return data;
+          }
+        } catch (e) { lastErr = e; }
+
+        // 2) allorigins /get (returns { contents: "..." })
+        try {
+          const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(yahoo)}`;
+          const res = await fetch(proxy, { cache: 'no-store' });
+          if (!res.ok) throw new Error('allorigins HTTP ' + res.status);
+          const wrap = await res.json();
+          const raw = wrap.contents || wrap;
+          const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+          if (data?.chart?.result?.[0]) return data;
+          throw new Error('allorigins empty');
+        } catch (e) { lastErr = e; }
+
+        // 3) allorigins /raw
+        try {
+          const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(yahoo)}`;
+          const res = await fetch(proxy, { cache: 'no-store' });
+          if (!res.ok) throw new Error('allorigins raw HTTP ' + res.status);
+          const data = await res.json();
+          if (data?.chart?.result?.[0]) return data;
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('yahoo unreachable');
+    }
+
     async function fetchPrevClose(symbol, opts = {}) {
-      const t = symbol.toUpperCase();
+      const t = String(symbol || '').toUpperCase().trim();
       const force = !!opts.force;
+      if (!t) throw new Error('empty symbol');
       if (!force && priceCache[t] && (Date.now() - (priceCache[t].fetchedAt || 0)) < 5 * 60 * 1000) {
         return priceCache[t];
       }
       // Money markets / cash
-      if (/^(VMFXX|SPAXX|FDRXX|SWVXX|FCASH|CASH)$/i.test(t)) {
+      if (/^(VMFXX|SPAXX|FDRXX|SWVXX|FCASH|CASH|CORE\*\*|CORE)$/i.test(t)) {
         const old = priceCache[t];
         const r = { price: 1, asOf: 'par', source: 'cash', dayPrev: 1, refreshPrev: old?.price ?? 1, name: t };
         priceCache[t] = { ...r, fetchedAt: Date.now() };
         return r;
       }
-      const yahoo = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(t)}?interval=1d&range=10d`;
-      const urls = [
-        yahoo,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(yahoo)}`,
-        `https://corsproxy.io/?${encodeURIComponent(yahoo)}`,
-      ];
+      // Retry once on transient proxy failures
       let lastErr = null;
-      for (const url of urls) {
+      for (let attempt = 0; attempt < 2; attempt++) {
         try {
-          const res = await fetch(url, { cache: 'no-store' });
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          const data = await res.json();
-          const result = data?.chart?.result?.[0];
-          if (!result) throw new Error('no result');
-          const meta = result.meta || {};
-          const quotes = result.indicators?.quote?.[0];
-          // Keep full close series aligned with timestamps (don't filter before indexing)
-          const rawCloses = quotes?.close || [];
-          const ts = result.timestamp || [];
-          const pairs = [];
-          for (let i = 0; i < rawCloses.length; i++) {
-            if (rawCloses[i] != null && !isNaN(rawCloses[i])) pairs.push({ c: Number(rawCloses[i]), t: ts[i] });
-          }
-          let price = null;
-          let dayPrev = null;
-          let asOf = '';
-          if (pairs.length >= 1) {
-            const last = pairs[pairs.length - 1];
-            const lastDate = last.t ? new Date(last.t * 1000) : null;
-            const isSameDay = lastDate && lastDate.toDateString() === new Date().toDateString();
-            // Use last completed session close (skip incomplete "today" bar when present)
-            let idx = pairs.length - 1;
-            if (isSameDay && pairs.length >= 2) idx = pairs.length - 2;
-            price = pairs[idx].c;
-            asOf = pairs[idx].t ? new Date(pairs[idx].t * 1000).toLocaleDateString() : '';
-            // Prior session close for day change (must be the bar before idx, not the same bar)
-            if (idx >= 1) dayPrev = pairs[idx - 1].c;
-          }
-          if (price == null || isNaN(price)) {
-            price = meta.regularMarketPrice || meta.chartPreviousClose || meta.previousClose;
-            asOf = asOf || 'prior close';
-          }
-          if (dayPrev == null) {
-            const cp = meta.chartPreviousClose || meta.previousClose;
-            // Only use as dayPrev if it's different from price
-            if (cp != null && Math.abs(Number(cp) - Number(price)) > 0.0001) dayPrev = Number(cp);
-          }
-          // Mutual funds often have better values on meta than daily bars
-          if (meta.instrumentType === 'MUTUALFUND' || /^[A-Z]{5}$/.test(t)) {
-            const mf = meta.regularMarketPrice ?? meta.previousClose;
-            if (mf != null && !isNaN(mf) && mf > 0) {
-              price = Number(mf);
-              const cp = meta.chartPreviousClose ?? meta.previousClose;
-              if (cp != null && Math.abs(Number(cp) - price) > 0.0001) dayPrev = Number(cp);
-            }
-          }
-          if (price == null || isNaN(price) || price <= 0) throw new Error('no price');
+          if (attempt) await new Promise(r => setTimeout(r, 250 + attempt * 200));
+          const data = await fetchYahooJson(t);
+          const { price, dayPrev, asOf, meta } = parseYahooChartPayload(data, t);
           const old = priceCache[t];
           const refreshPrev = (old && old.price != null) ? Number(old.price) : null;
           const dayPrevN = dayPrev != null ? Number(dayPrev) : null;
@@ -2000,6 +2055,11 @@ VTI,50,240.00,13250.00,Capital One Investing`
     }
 
     async function refreshMarketPrices() {
+      if (window.__priceRefreshBusy) {
+        toast('Refresh already running…');
+        return;
+      }
+      window.__priceRefreshBusy = true;
       const data = viewHoldings();
       // Price real tickers AND mapped fund symbols (NON* → FXAIX/FBGRX etc.)
       const tickers = [...new Set(
@@ -2008,10 +2068,11 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const hasAnnuities = holdings.some(isAnnuityPosition);
       const homeOn = homeSettings.include && (homeSettings.properties || []).length;
       if (!tickers.length && !homeOn && !hasAnnuities) {
+        window.__priceRefreshBusy = false;
         toast('Load positions or enable Home valuation first');
         return;
       }
-      toast(`Refreshing${tickers.length ? ' ' + tickers.length + ' prices' : ''}${hasAnnuities ? ' + annuities' : ''}${homeOn ? ' + home' : ''}…`);
+      toast(`Refreshing${tickers.length ? ' ' + tickers.length + ' prices' : ''}${hasAnnuities ? ' + annuities' : ''}…`);
       const btn = document.getElementById('btnRefreshPrices');
       if (btn) {
         btn.disabled = true;
@@ -2019,44 +2080,49 @@ VTI,50,240.00,13250.00,Capital One Investing`
       }
 
       let updated = 0, failed = 0;
+      const failedTickers = [];
       const asOfDates = new Set();
-      const queue = [...tickers];
-      const workers = 4;
-      async function worker() {
-        while (queue.length) {
-          const t = queue.shift();
-          try {
-            const r = await fetchPrevClose(t, { force: true });
-            if (r.asOf) asOfDates.add(r.asOf);
-            // Also mirror under any position ticker that maps to this yahoo symbol
-            holdings.forEach(p => {
-              const yt = yahooSymbolForPosition(p);
-              const pt = String(p.ticker || '').toUpperCase();
-              if (yt !== t && pt !== t) return;
-              // Cache under position ticker so table lookup works
-              if (pt && pt !== t) priceCache[pt] = { ...r, fetchedAt: Date.now() };
-              if (p.statement_value == null && p.market_value != null) {
-                p.statement_value = p.market_value;
-              }
-              const shares = p.shares;
-              if (shares == null || isNaN(shares)) return;
-              const newVal = shares * r.price;
-              p.last_price = r.price;
-              p.market_value = newVal;
-              if (p.cost_basis != null) p.unrealized_gl = newVal - p.cost_basis;
-              p.price_as_of = r.asOf;
-              p.price_source = r.source;
-            });
-            updated++;
-          } catch (e) {
-            failed++;
-            console.warn('Price fail', t, e);
-          }
+      // Sequential + small delay: public CORS proxies rate-limit parallel bursts (was causing ~27 fails)
+      async function priceOne(t) {
+        try {
+          const r = await fetchPrevClose(t, { force: true });
+          if (r.asOf) asOfDates.add(r.asOf);
+          holdings.forEach(p => {
+            const yt = yahooSymbolForPosition(p);
+            const pt = String(p.ticker || '').toUpperCase();
+            if (yt !== t && pt !== t) return;
+            if (pt && pt !== t) priceCache[pt] = { ...r, fetchedAt: Date.now() };
+            if (p.statement_value == null && p.market_value != null) {
+              p.statement_value = p.market_value;
+            }
+            const shares = p.shares;
+            if (shares == null || isNaN(shares)) return;
+            const newVal = shares * r.price;
+            p.last_price = r.price;
+            p.market_value = newVal;
+            if (p.cost_basis != null) p.unrealized_gl = newVal - p.cost_basis;
+            p.price_as_of = r.asOf;
+            p.price_source = r.source;
+          });
+          updated++;
+        } catch (e) {
+          failed++;
+          failedTickers.push(t);
+          console.warn('Price fail', t, e);
         }
       }
-      const stockJob = tickers.length
-        ? Promise.all(Array.from({ length: Math.min(workers, tickers.length) }, () => worker()))
-        : Promise.resolve();
+      const stockJob = (async () => {
+        // 2 concurrent streams with pacing — better success than 4-wide blasts
+        const q = [...tickers];
+        async function worker() {
+          while (q.length) {
+            const t = q.shift();
+            await priceOne(t);
+            await new Promise(r => setTimeout(r, 120));
+          }
+        }
+        await Promise.all([worker(), worker()]);
+      })();
 
       let homeMsg = '';
       const homeJob = (async () => {
@@ -2086,6 +2152,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
         at: new Date(),
         updated,
         failed,
+        failedTickers: failedTickers.slice(0, 12),
         asOf: [...asOfDates].filter(Boolean).slice(0, 3).join(', ') || 'prior close'
       };
       try { saveState(); } catch (_) {}
@@ -2103,6 +2170,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
         btn.disabled = false;
         btn.textContent = '↻ Refresh prices';
       }
+      window.__priceRefreshBusy = false;
     }
 
     function renderOverview() {
@@ -2160,6 +2228,9 @@ VTI,50,240.00,13250.00,Capital One Investing`
         ? `Last refresh ${lastPriceRefresh.at.toLocaleString()} · ${lastPriceRefresh.updated} priced · as-of ${lastPriceRefresh.asOf}`
             + (lastPriceRefresh.failed ? ` · ${lastPriceRefresh.failed} failed` : '')
         : 'Uses statement values until you refresh. Stocks/ETFs = prior close; annuities ≈ SPY-scaled; homes = your manual values when enabled.';
+      const failList = (lastPriceRefresh?.failedTickers && lastPriceRefresh.failedTickers.length)
+        ? `<p class="text-[10px] text-rose-300/90 mt-1">Failed: ${lastPriceRefresh.failedTickers.join(', ')}${lastPriceRefresh.failed > lastPriceRefresh.failedTickers.length ? '…' : ''}</p>`
+        : '';
 
       let html = `
         ${excludedNote}
@@ -2172,7 +2243,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
             </button>
           </div>
           <p class="text-[11px] text-slate-400 leading-snug">${refreshInfo}</p>
-          <p class="text-[11px] text-slate-500 mt-1">Stocks/ETFs/funds: shares × prior close (Yahoo). Cash @ $1. Annuities (Lincoln/Jackson): statement value scaled by SPY vs baseline (approx; not insurer interim value). Other CUSIPs unchanged. Home: Redfin when available.</p>
+          ${failList}
+          <p class="text-[11px] text-slate-500 mt-1">Stocks/ETFs/funds: shares × prior close (Yahoo via CORS proxy). Cash @ $1. Annuities (Lincoln/Jackson): statement value scaled by SPY vs baseline. CUSIPs without a mapped ticker stay on statement value. <span class="text-sky-400">Pull down from the top</span> to refresh on iPhone.</p>
         </div>
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold mb-2 text-slate-300">Asset Class Mix</h3>
@@ -4145,6 +4217,55 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
     // Init
     loadState();
+
+    // iOS-friendly pull-to-refresh → refreshMarketPrices
+    (function setupPullToRefresh() {
+      const hint = document.getElementById('pullRefreshHint');
+      const pill = hint?.querySelector('.pill');
+      let startY = 0;
+      let pulling = false;
+      let armed = false;
+      const THRESH = 72;
+
+      function atTop() {
+        return (window.scrollY || document.documentElement.scrollTop || 0) <= 2;
+      }
+
+      document.addEventListener('touchstart', (e) => {
+        if (!atTop() || window.__priceRefreshBusy) return;
+        if (!e.touches?.[0]) return;
+        startY = e.touches[0].clientY;
+        pulling = true;
+        armed = false;
+      }, { passive: true });
+
+      document.addEventListener('touchmove', (e) => {
+        if (!pulling || !e.touches?.[0]) return;
+        const dy = e.touches[0].clientY - startY;
+        if (dy < 8 || !atTop()) {
+          if (hint) hint.classList.remove('show');
+          armed = false;
+          return;
+        }
+        if (hint) {
+          hint.classList.add('show');
+          if (pill) pill.textContent = dy >= THRESH ? '↑ Release to refresh prices' : '↓ Pull to refresh prices';
+        }
+        armed = dy >= THRESH;
+      }, { passive: true });
+
+      document.addEventListener('touchend', () => {
+        if (!pulling) return;
+        pulling = false;
+        if (hint) hint.classList.remove('show');
+        if (armed && !window.__priceRefreshBusy) {
+          if (pill) pill.textContent = 'Refreshing…';
+          toast('Pull-refresh: updating prices…');
+          refreshMarketPrices();
+        }
+        armed = false;
+      }, { passive: true });
+    })();
   </script>
 </body>
 </html>
