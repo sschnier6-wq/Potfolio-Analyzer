@@ -66,7 +66,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v55</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v56</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1828,6 +1828,45 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return { price: Number(price), dayPrev, asOf, meta };
     }
 
+    function getFinnhubKey() {
+      try { return (localStorage.getItem('portfolio_finnhub_key') || '').trim(); } catch (_) { return ''; }
+    }
+    function setFinnhubKey(k) {
+      try {
+        if (k) localStorage.setItem('portfolio_finnhub_key', k.trim());
+        else localStorage.removeItem('portfolio_finnhub_key');
+      } catch (_) {}
+    }
+
+    async function fetchViaCorsProxies(targetUrl) {
+      const proxies = [
+        // Browser-oriented proxies (need Origin; work on iPhone Safari, not from servers)
+        (u) => `https://proxy.cors.sh/${u}`,
+        (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+        (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+        (u) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
+      ];
+      let lastErr = null;
+      for (const build of proxies) {
+        try {
+          const res = await fetch(build(targetUrl), { cache: 'no-store', mode: 'cors' });
+          if (!res.ok) throw new Error('proxy HTTP ' + res.status);
+          const text = await res.text();
+          let data;
+          try { data = JSON.parse(text); } catch (_) {
+            // allorigins /get wraps as { contents: "..." }
+            const wrap = JSON.parse(text);
+            data = typeof wrap.contents === 'string' ? JSON.parse(wrap.contents) : wrap.contents;
+          }
+          if (data?.contents && typeof data.contents === 'string') {
+            data = JSON.parse(data.contents);
+          }
+          return data;
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('all proxies failed');
+    }
+
     async function fetchYahooJson(symbol) {
       const t = encodeURIComponent(symbol);
       const paths = [
@@ -1836,41 +1875,106 @@ VTI,50,240.00,13250.00,Capital One Investing`
       ];
       let lastErr = null;
       for (const yahoo of paths) {
-        // 1) Direct (works in some browsers / WebViews)
         try {
-          const res = await fetch(yahoo, {
-            cache: 'no-store',
-            mode: 'cors',
-            headers: { Accept: 'application/json' }
-          });
+          const res = await fetch(yahoo, { cache: 'no-store', mode: 'cors', headers: { Accept: 'application/json' } });
           if (res.ok) {
             const data = await res.json();
             if (data?.chart?.result?.[0]) return data;
           }
         } catch (e) { lastErr = e; }
-
-        // 2) allorigins /get (returns { contents: "..." })
         try {
-          const proxy = `https://api.allorigins.win/get?url=${encodeURIComponent(yahoo)}`;
-          const res = await fetch(proxy, { cache: 'no-store' });
-          if (!res.ok) throw new Error('allorigins HTTP ' + res.status);
-          const wrap = await res.json();
-          const raw = wrap.contents || wrap;
-          const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
-          if (data?.chart?.result?.[0]) return data;
-          throw new Error('allorigins empty');
-        } catch (e) { lastErr = e; }
-
-        // 3) allorigins /raw
-        try {
-          const proxy = `https://api.allorigins.win/raw?url=${encodeURIComponent(yahoo)}`;
-          const res = await fetch(proxy, { cache: 'no-store' });
-          if (!res.ok) throw new Error('allorigins raw HTTP ' + res.status);
-          const data = await res.json();
+          const data = await fetchViaCorsProxies(yahoo);
           if (data?.chart?.result?.[0]) return data;
         } catch (e) { lastErr = e; }
       }
       throw lastErr || new Error('yahoo unreachable');
+    }
+
+    // Nasdaq public quote API (prior session / last sale) — no API key
+    async function fetchNasdaqQuote(symbol) {
+      const t = String(symbol || '').toUpperCase();
+      // Guess asset class for Nasdaq endpoints
+      const classes = [];
+      if (/^[A-Z]{5}$/.test(t)) classes.push('mutualfunds'); // classic mutual-fund ticker
+      classes.push('etf', 'stocks', 'index');
+      let lastErr = null;
+      for (const asset of classes) {
+        const url = `https://api.nasdaq.com/api/quote/${encodeURIComponent(t)}/info?assetclass=${asset}`;
+        try {
+          let data = null;
+          try {
+            const res = await fetch(url, {
+              cache: 'no-store',
+              headers: { Accept: 'application/json', 'User-Agent': 'Mozilla/5.0' }
+            });
+            if (res.ok) data = await res.json();
+          } catch (_) {
+            data = await fetchViaCorsProxies(url);
+          }
+          const pd = data?.data?.primaryData;
+          if (!pd) throw new Error('no nasdaq primaryData');
+          const parseMoney = (s) => {
+            if (s == null) return null;
+            const n = parseFloat(String(s).replace(/[$,]/g, ''));
+            return isNaN(n) ? null : n;
+          };
+          const price = parseMoney(pd.lastSalePrice);
+          if (price == null || price <= 0) throw new Error('no nasdaq price');
+          // netChange is vs prior close → prior ≈ price - netChange
+          const net = parseMoney(pd.netChange);
+          const dayPrev = (net != null) ? price - net : null;
+          const asOf = pd.lastTradeTimestamp || 'nasdaq';
+          return { price, dayPrev, asOf, source: 'nasdaq', name: data?.data?.companyName || t };
+        } catch (e) { lastErr = e; }
+      }
+      throw lastErr || new Error('nasdaq failed');
+    }
+
+    // Finnhub free tier (optional key) — CORS-enabled, reliable prior close
+    async function fetchFinnhubQuote(symbol) {
+      const key = getFinnhubKey();
+      if (!key) throw new Error('no finnhub key');
+      const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(key)}`;
+      const res = await fetch(url, { cache: 'no-store' });
+      if (!res.ok) throw new Error('finnhub HTTP ' + res.status);
+      const d = await res.json();
+      // c = current, pc = previous close
+      const price = d.c != null && d.c > 0 ? Number(d.c) : (d.pc != null ? Number(d.pc) : null);
+      const dayPrev = d.pc != null && d.pc > 0 ? Number(d.pc) : null;
+      if (price == null || price <= 0) throw new Error('finnhub no price');
+      // Prefer previous close as "as of prior session" when market closed
+      const usePrice = dayPrev != null && (d.c == null || d.c === 0) ? dayPrev : price;
+      return {
+        price: usePrice,
+        dayPrev,
+        asOf: d.t ? new Date(d.t * 1000).toLocaleDateString() : 'finnhub',
+        source: 'finnhub',
+        name: symbol
+      };
+    }
+
+    function finalizePriceResult(t, price, dayPrev, asOf, source, name) {
+      const old = priceCache[t];
+      const refreshPrev = (old && old.price != null) ? Number(old.price) : null;
+      const dayPrevN = dayPrev != null ? Number(dayPrev) : null;
+      let changePct = null;
+      const baseForPct = (refreshPrev != null && Math.abs(price - refreshPrev) > 0.00005)
+        ? refreshPrev
+        : dayPrevN;
+      if (baseForPct != null && baseForPct > 0) {
+        changePct = ((Number(price) - baseForPct) / baseForPct) * 100;
+      }
+      const r = {
+        price: Number(price),
+        asOf: asOf || '',
+        source: source || 'unknown',
+        dayPrev: dayPrevN,
+        refreshPrev,
+        changePct,
+        name: name || t
+      };
+      priceCache[t] = { ...r, fetchedAt: Date.now() };
+      return r;
     }
 
     async function fetchPrevClose(symbol, opts = {}) {
@@ -1880,47 +1984,32 @@ VTI,50,240.00,13250.00,Capital One Investing`
       if (!force && priceCache[t] && (Date.now() - (priceCache[t].fetchedAt || 0)) < 5 * 60 * 1000) {
         return priceCache[t];
       }
-      // Money markets / cash
       if (/^(VMFXX|SPAXX|FDRXX|SWVXX|FCASH|CASH|CORE\*\*|CORE)$/i.test(t)) {
-        const old = priceCache[t];
-        const r = { price: 1, asOf: 'par', source: 'cash', dayPrev: 1, refreshPrev: old?.price ?? 1, name: t };
-        priceCache[t] = { ...r, fetchedAt: Date.now() };
-        return r;
+        return finalizePriceResult(t, 1, 1, 'par', 'cash', t);
       }
-      // Retry once on transient proxy failures
-      let lastErr = null;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          if (attempt) await new Promise(r => setTimeout(r, 250 + attempt * 200));
-          const data = await fetchYahooJson(t);
-          const { price, dayPrev, asOf, meta } = parseYahooChartPayload(data, t);
-          const old = priceCache[t];
-          const refreshPrev = (old && old.price != null) ? Number(old.price) : null;
-          const dayPrevN = dayPrev != null ? Number(dayPrev) : null;
-          let changePct = null;
-          const baseForPct = (refreshPrev != null && Math.abs(price - refreshPrev) > 0.00005)
-            ? refreshPrev
-            : dayPrevN;
-          if (baseForPct != null && baseForPct > 0) {
-            changePct = ((Number(price) - baseForPct) / baseForPct) * 100;
-          }
-          const r = {
-            price: Number(price),
-            asOf,
-            source: 'yahoo',
-            dayPrev: dayPrevN,
-            refreshPrev,
-            changePct,
-            name: meta.longName || meta.shortName || t,
-            instrumentType: meta.instrumentType || null
-          };
-          priceCache[t] = { ...r, fetchedAt: Date.now() };
-          return r;
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-      throw lastErr || new Error('fetch failed');
+
+      const errors = [];
+
+      // 1) Finnhub (if user saved a free API key) — most reliable in browsers
+      try {
+        const fh = await fetchFinnhubQuote(t);
+        return finalizePriceResult(t, fh.price, fh.dayPrev, fh.asOf, fh.source, fh.name);
+      } catch (e) { errors.push('finnhub:' + (e.message || e)); }
+
+      // 2) Yahoo chart (direct + CORS proxies)
+      try {
+        const data = await fetchYahooJson(t);
+        const { price, dayPrev, asOf, meta } = parseYahooChartPayload(data, t);
+        return finalizePriceResult(t, price, dayPrev, asOf, 'yahoo', meta.longName || meta.shortName || t);
+      } catch (e) { errors.push('yahoo:' + (e.message || e)); }
+
+      // 3) Nasdaq public quote (last sale / net change → prior close)
+      try {
+        const nq = await fetchNasdaqQuote(t);
+        return finalizePriceResult(t, nq.price, nq.dayPrev, nq.asOf, nq.source, nq.name);
+      } catch (e) { errors.push('nasdaq:' + (e.message || e)); }
+
+      throw new Error(errors.join(' | ') || 'fetch failed');
     }
 
     async function refreshAllHomeEstimates() {
@@ -2244,7 +2333,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
           </div>
           <p class="text-[11px] text-slate-400 leading-snug">${refreshInfo}</p>
           ${failList}
-          <p class="text-[11px] text-slate-500 mt-1">Stocks/ETFs/funds: shares × prior close (Yahoo via CORS proxy). Cash @ $1. Annuities (Lincoln/Jackson): statement value scaled by SPY vs baseline. CUSIPs without a mapped ticker stay on statement value. <span class="text-sky-400">Pull down from the top</span> to refresh on iPhone.</p>
+          <p class="text-[11px] text-slate-500 mt-1">Prices: Finnhub (if key set) → Yahoo → Nasdaq. Cash @ $1. Annuities ≈ SPY-scaled. <span class="text-sky-400">Pull down from the top</span> to refresh.</p>
+          <div class="mt-2 pt-2 border-t border-slate-700">
+            <label class="text-[10px] text-slate-500 block">Free Finnhub API key (optional — fixes most failures)
+              <input id="finnhubKeyInput" type="text" placeholder="paste key from finnhub.io" value="${getFinnhubKey()}"
+                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300 text-xs" />
+            </label>
+            <div class="flex gap-2 mt-1.5">
+              <button type="button" id="btnSaveFinnhub" class="text-[11px] font-semibold bg-slate-700 hover:bg-slate-600 text-white rounded-lg px-2.5 py-1">Save key</button>
+              <a href="https://finnhub.io/register" target="_blank" rel="noopener" class="text-[11px] text-sky-400 self-center">Get free key ↗</a>
+            </div>
+            <p class="text-[10px] text-slate-600 mt-1">Key stays only on this phone. Free tier is enough for portfolio refresh.</p>
+          </div>
         </div>
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold mb-2 text-slate-300">Asset Class Mix</h3>
@@ -2308,6 +2408,12 @@ VTI,50,240.00,13250.00,Capital One Investing`
       `;
       $('#panel-overview').innerHTML = html;
 
+      const btnFh = document.getElementById('btnSaveFinnhub');
+      if (btnFh) btnFh.onclick = () => {
+        const v = document.getElementById('finnhubKeyInput')?.value || '';
+        setFinnhubKey(v);
+        toast(v.trim() ? 'Finnhub key saved — refresh prices' : 'Finnhub key cleared');
+      };
       const btnRef = document.getElementById('btnRefreshPrices');
       if (btnRef) btnRef.onclick = () => { refreshMarketPrices(); };
 
