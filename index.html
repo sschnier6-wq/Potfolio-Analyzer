@@ -66,7 +66,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v59</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v61</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -4302,11 +4302,6 @@ VTI,50,240.00,13250.00,Capital One Investing`
         return;
       }
 
-      const forced = budgetForceReview;
-      const g = applyGuardrails(s0, portfolioNow, profile, { force: forced });
-      budgetForceReview = false;
-      saveBudgetSettings(g.nextSettings);
-
       // Placeholder while historical series loads
       $('#panel-budget').innerHTML = `
         <div class="card p-3 mb-3 text-xs text-slate-400">Loading past 12 months from historical prices…</div>
@@ -4314,34 +4309,58 @@ VTI,50,240.00,13250.00,Capital One Investing`
       `;
 
       let pastHtml = '';
-      let pastNote = '';
+      let pastRows = [];
+      let g; // unified current recommendation (end of 12-mo walk)
+
       try {
         const series = await buildPast12MonthPortfolioSeries(!!s0.includeHome);
-        // Use live portfolio for current month so the path ends on today's number
-        const rowsForCalc = series.rows.map((r, i) => {
-          if (i === series.rows.length - 1) return { ...r, portfolio: g.portfolioNow };
+        // One path only: sequential GK from oldest month → now (live portfolio on last row)
+        const rowsForWalk = series.rows.map((r, i) => {
+          if (i === series.rows.length - 1) return { ...r, portfolio: portfolioNow };
           return r;
         });
-        // Sequential Guyton–Klinger back-calc (same rules as live card)
-        let pastRows = backCalcGuardrailsSeries(rowsForCalc, profile);
-        // Pin current month display to live guardrails card exactly
-        if (pastRows.length) {
-          const last = pastRows[pastRows.length - 1];
-          last.portfolio = g.portfolioNow;
-          last.monthly = g.monthly;
-          last.monthlyMin = g.monthlyMin;
-          last.monthlyMax = g.monthlyMax;
-          last.annual = g.annual;
-          last.rate = g.portfolioNow > 0 ? g.annual / g.portfolioNow : profile.baseRate;
-          last.isCurrent = true;
-          last.fromGuardrails = true;
-          last.note = 'Live guardrails';
-        }
-        pastNote = `Portfolio from share counts × first trading-day close (${series.symbols} symbols). Mid target walks the same rules as above: −5% if port ≤−10%, +5% if ≥+12%, then clamp rate to ${(profile.baseRate * 0.8 * 100).toFixed(1)}–${(profile.baseRate * 1.2 * 100).toFixed(1)}%. Home ${s0.includeHome ? 'included' : 'excluded'}.`;
+        pastRows = backCalcGuardrailsSeries(rowsForWalk, profile);
+        if (pastRows.length) pastRows[pastRows.length - 1].isCurrent = true;
+
+        // Current month = last step of the same walk (not a separate localStorage path)
+        const cur = pastRows[pastRows.length - 1] || spendForPortfolio(portfolioNow, profile);
+        const lower = profile.baseRate * 0.80;
+        const upper = profile.baseRate * 1.20;
+        const baseAnnual = portfolioNow * profile.baseRate;
+        g = {
+          portfolioNow,
+          annual: cur.annual,
+          monthly: cur.monthly,
+          monthlyMin: (portfolioNow * lower) / 12,
+          monthlyMax: (portfolioNow * upper) / 12,
+          monthlyBase: baseAnnual / 12,
+          currentRate: portfolioNow > 0 ? cur.annual / portfolioNow : profile.baseRate,
+          lowerRate: lower,
+          upperRate: upper,
+          profile,
+          perfVsLast: 0,
+          actions: [
+            'Recommended = end of the same 12‑month sequential walk shown below.',
+            'Dollar mid target starts at base rate and only ±5% after ≥10% down / ≥12% up MoM moves; then clamped inside the rail band.',
+            'Each month’s range is always that month’s portfolio × ' + (lower * 100).toFixed(1) + '%–' + (upper * 100).toFixed(1) + '%.'
+          ]
+        };
+
+        // Persist unified annual so refresh stays consistent with the walk
+        const nextSettings = Object.assign({}, s0, {
+          annualSpend: g.annual,
+          lastPortfolio: portfolioNow,
+          lastReviewAt: new Date().toISOString(),
+          initialPortfolio: s0.initialPortfolio || rowsForWalk[0]?.portfolio || portfolioNow,
+          initialRate: s0.initialRate || profile.baseRate
+        });
+        saveBudgetSettings(nextSettings);
+        budgetForceReview = false;
+
         pastHtml = `
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold text-slate-300 mb-1">Past 12 months · safe spend</h3>
-          <p class="text-[10px] text-slate-500 mb-2">${pastNote}</p>
+          <p class="text-[10px] text-slate-500 mb-2">One sequential path for every month including now. Portfolio from share counts × first trading-day close (${series.symbols} symbols). Home ${s0.includeHome ? 'included' : 'excluded'}.</p>
           <div class="space-y-1.5">
             <div class="flex justify-between text-[10px] text-slate-500 border-b border-slate-700 pb-1">
               <span>Month (1st)</span>
@@ -4359,18 +4378,26 @@ VTI,50,240.00,13250.00,Capital One Investing`
                 </div>
               </div>`).join('')}
           </div>
-          <p class="text-[10px] text-slate-600 mt-2">Mid target is the sequential guardrails recommendation (not always base ${(profile.baseRate * 100).toFixed(1)}%). Current month matches the card above.</p>
+          <p class="text-[10px] text-slate-600 mt-2">Mid $ only changes after large MoM portfolio moves (±5%) or when rate hits a rail. Range always scales with that month’s portfolio. “Now” is the last row of this same walk.</p>
         </div>`;
       } catch (e) {
         console.warn(e);
-        pastHtml = `<div class="card p-3 mb-3 text-xs text-rose-300">Could not load full history (${e.message || e}). Showing current month only. Try Overview → Refresh prices or add a Finnhub key.</div>`;
+        const forced = budgetForceReview;
+        g = applyGuardrails(s0, portfolioNow, profile, { force: forced });
+        budgetForceReview = false;
+        saveBudgetSettings(g.nextSettings);
+        pastHtml = `<div class="card p-3 mb-3 text-xs text-rose-300">Could not load full history (${e.message || e}). Showing current month from live rules only.</div>`;
+      }
+
+      if (!g) {
+        g = applyGuardrails(s0, portfolioNow, profile, { force: true });
+        saveBudgetSettings(g.nextSettings);
       }
 
       const html = `
         <div class="card p-3 mb-3 text-xs text-slate-400 leading-relaxed">
           <strong class="text-slate-300">Guardrails spending</strong> (Guyton–Klinger style):
-          risk-based withdrawal rate on portfolio value.
-          <strong class="text-slate-300">Past 12 months</strong> use first-of-month reconstructed portfolio values from historical prices.
+          one sequential walk over the past 12 months; <strong class="text-slate-300">this month’s recommended amount is the last step of that walk</strong>.
           <span class="text-amber-300/90">Not financial advice</span>.
         </div>
 
@@ -4400,7 +4427,6 @@ VTI,50,240.00,13250.00,Capital One Investing`
             <div class="flex justify-between"><span>Base withdrawal rate</span><span class="text-slate-200">${(g.profile.baseRate * 100).toFixed(1)}%</span></div>
             <div class="flex justify-between"><span>Rail band (rate)</span><span class="text-slate-200">${(g.lowerRate * 100).toFixed(1)}% – ${(g.upperRate * 100).toFixed(1)}%</span></div>
             <div class="flex justify-between"><span>Rail band ($/mo)</span><span class="text-slate-200">${fmtMoney(g.monthlyMin)} – ${fmtMoney(g.monthlyMax)}</span></div>
-            <div class="flex justify-between"><span>vs last review</span><span class="${g.perfVsLast >= 0 ? 'text-emerald-300' : 'text-rose-300'}">${g.perfVsLast >= 0 ? '+' : ''}${(g.perfVsLast * 100).toFixed(1)}%</span></div>
           </div>
           <ul class="mt-2 text-[11px] text-slate-400 list-disc pl-4 space-y-1">
             ${g.actions.map(a => `<li>${a}</li>`).join('')}
