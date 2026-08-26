@@ -66,7 +66,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v56</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v57</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1867,11 +1867,12 @@ VTI,50,240.00,13250.00,Capital One Investing`
       throw lastErr || new Error('all proxies failed');
     }
 
-    async function fetchYahooJson(symbol) {
+    async function fetchYahooJson(symbol, range = '10d', interval = '1d') {
       const t = encodeURIComponent(symbol);
+      const q = `interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
       const paths = [
-        `https://query1.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=10d`,
-        `https://query2.finance.yahoo.com/v8/finance/chart/${t}?interval=1d&range=10d`,
+        `https://query1.finance.yahoo.com/v8/finance/chart/${t}?${q}`,
+        `https://query2.finance.yahoo.com/v8/finance/chart/${t}?${q}`,
       ];
       let lastErr = null;
       for (const yahoo of paths) {
@@ -1888,6 +1889,141 @@ VTI,50,240.00,13250.00,Capital One Investing`
         } catch (e) { lastErr = e; }
       }
       throw lastErr || new Error('yahoo unreachable');
+    }
+
+    // Cache: symbol -> { ymKey: closePrice } for first trading day of each month
+    let histMonthCache = {}; // symbol -> { fetchedAt, byYm: { '202508': price } }
+
+    function extractFirstOfMonthCloses(chartData) {
+      const result = chartData?.chart?.result?.[0];
+      if (!result) return {};
+      const ts = result.timestamp || [];
+      const closes = result.indicators?.quote?.[0]?.close || [];
+      const byYm = {};
+      for (let i = 0; i < ts.length; i++) {
+        const c = closes[i];
+        if (c == null || isNaN(c) || c <= 0) continue;
+        const d = new Date(ts[i] * 1000);
+        const y = d.getUTCFullYear();
+        const m = d.getUTCMonth(); // 0-11
+        const key = y * 100 + (m + 1);
+        // Keep earliest trading day in that calendar month (first-of-month proxy)
+        if (byYm[key] == null || d.getUTCDate() < byYm[key].day) {
+          byYm[key] = { price: Number(c), day: d.getUTCDate() };
+        }
+      }
+      const out = {};
+      Object.keys(byYm).forEach(k => { out[k] = byYm[k].price; });
+      return out;
+    }
+
+    async function fetchFirstOfMonthPrices(symbol) {
+      const t = String(symbol || '').toUpperCase().trim();
+      if (!t) return {};
+      const cached = histMonthCache[t];
+      if (cached && (Date.now() - cached.fetchedAt) < 6 * 60 * 60 * 1000) return cached.byYm;
+      try {
+        // 13mo daily so we have a full prior 12 months + current
+        const data = await fetchYahooJson(t, '13mo', '1d');
+        const byYm = extractFirstOfMonthCloses(data);
+        histMonthCache[t] = { fetchedAt: Date.now(), byYm };
+        return byYm;
+      } catch (e) {
+        console.warn('hist month fail', t, e);
+        return (cached && cached.byYm) || {};
+      }
+    }
+
+    /** Build past 12 month-start portfolio values from current holdings × historical prices */
+    async function buildPast12MonthPortfolioSeries(includeHome) {
+      const positions = viewHoldings();
+      const homeAdd = includeHome ? totalHomeValue() : 0;
+      const now = new Date();
+      // Month keys: current month and 11 prior (12 total), oldest first
+      const monthKeys = [];
+      for (let i = 11; i >= 0; i--) {
+        const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+        monthKeys.push({
+          ym: d.getFullYear() * 100 + (d.getMonth() + 1),
+          label: d.toLocaleString('en-US', { month: 'short', year: 'numeric' }),
+          isCurrent: i === 0
+        });
+      }
+
+      // Unique pricable symbols
+      const symSet = new Set();
+      const posMeta = positions.map(p => {
+        const sym = yahooSymbolForPosition(p);
+        const shares = p.shares;
+        const curVal = p.market_value || 0;
+        const curPx = p.last_price || (shares > 0 ? curVal / shares : null);
+        if (sym) symSet.add(sym);
+        return { p, sym, shares, curVal, curPx };
+      });
+
+      // Fetch histories with mild concurrency
+      const symbols = [...symSet];
+      const histBySym = {};
+      const q = [...symbols];
+      async function worker() {
+        while (q.length) {
+          const s = q.shift();
+          histBySym[s] = await fetchFirstOfMonthPrices(s);
+          await new Promise(r => setTimeout(r, 80));
+        }
+      }
+      await Promise.all([worker(), worker()]);
+
+      // Latest known price per symbol (for ratio)
+      const latestPx = {};
+      symbols.forEach(s => {
+        const byYm = histBySym[s] || {};
+        // prefer current month, else newest key
+        const keys = Object.keys(byYm).map(Number).sort((a, b) => b - a);
+        if (keys.length) latestPx[s] = byYm[keys[0]];
+      });
+
+      const rows = monthKeys.map(mk => {
+        let inv = 0;
+        let priced = 0, unpriced = 0;
+        posMeta.forEach(({ sym, shares, curVal, curPx }) => {
+          if (sym && histBySym[sym] && histBySym[sym][mk.ym] != null && shares != null && shares > 0) {
+            inv += shares * histBySym[sym][mk.ym];
+            priced++;
+          } else if (sym && histBySym[sym] && latestPx[sym] && curPx && curPx > 0 && shares != null && shares > 0) {
+            // scale current value by relative price if that exact month missing
+            const nearest = histBySym[sym][mk.ym];
+            if (nearest != null) {
+              inv += shares * nearest;
+              priced++;
+            } else {
+              // find closest earlier month
+              const keys = Object.keys(histBySym[sym]).map(Number).filter(k => k <= mk.ym).sort((a, b) => b - a);
+              if (keys.length) {
+                inv += shares * histBySym[sym][keys[0]];
+                priced++;
+              } else {
+                inv += curVal;
+                unpriced++;
+              }
+            }
+          } else {
+            // cash, annuities, CUSIPs: hold statement/current value constant
+            inv += curVal;
+            unpriced++;
+          }
+        });
+        const total = inv + homeAdd;
+        return {
+          ...mk,
+          portfolio: total,
+          investments: inv,
+          home: homeAdd,
+          priced, unpriced
+        };
+      });
+
+      return { rows, symbols: symbols.length, homeAdd };
     }
 
     // Nasdaq public quote API (prior session / last sale) — no API key
@@ -3867,7 +4003,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       if (panel) panel.classList.remove('hidden');
       // re-render charts / planners if needed
       if (name === 'overview' && holdings.length) renderOverview();
-      if (name === 'budget' && holdings.length) renderBudget();
+      if (name === 'budget' && holdings.length) renderBudget(); // async ok
       if (name === 'roth' && holdings.length) renderRoth();
     }
 
@@ -4070,7 +4206,24 @@ VTI,50,240.00,13250.00,Capital One Investing`
       };
     }
 
-    function renderBudget() {
+    function spendForPortfolio(portfolio, profile) {
+      const base = profile.baseRate;
+      const lower = base * 0.80;
+      const upper = base * 1.20;
+      const annual = portfolio * base;
+      return {
+        portfolio,
+        annual,
+        monthly: annual / 12,
+        monthlyMin: (portfolio * lower) / 12,
+        monthlyMax: (portfolio * upper) / 12,
+        rate: base,
+        lowerRate: lower,
+        upperRate: upper
+      };
+    }
+
+    async function renderBudget() {
       const data = viewHoldings();
       const invTotal = data.reduce((s, p) => s + (p.market_value || 0), 0);
       const s0 = loadBudgetSettings();
@@ -4086,15 +4239,58 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const forced = budgetForceReview;
       const g = applyGuardrails(s0, portfolioNow, profile, { force: forced });
       budgetForceReview = false;
-      // Always persist latest portfolio level so the next refresh can measure performance
       saveBudgetSettings(g.nextSettings);
+
+      // Placeholder while historical series loads
+      $('#panel-budget').innerHTML = `
+        <div class="card p-3 mb-3 text-xs text-slate-400">Loading past 12 months from historical prices…</div>
+        <div class="card p-4 text-center text-slate-500 text-sm">Fetching first-of-month closes…</div>
+      `;
+
+      let pastHtml = '';
+      let pastNote = '';
+      try {
+        const series = await buildPast12MonthPortfolioSeries(!!s0.includeHome);
+        const pastRows = series.rows.map(r => {
+          const sp = spendForPortfolio(r.portfolio, profile);
+          return { ...r, ...sp };
+        });
+        // Current month recommended from live guardrails (may differ slightly from pure base×portfolio)
+        const cur = pastRows[pastRows.length - 1];
+        pastNote = `Reconstructed from current share counts × first trading-day close each month (${series.symbols} symbols priced). Cash/annuities/CUSIPs held flat. Home ${s0.includeHome ? 'included' : 'excluded'}.`;
+        pastHtml = `
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold text-slate-300 mb-1">Past 12 months · safe spend</h3>
+          <p class="text-[10px] text-slate-500 mb-2">${pastNote}</p>
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-[10px] text-slate-500 border-b border-slate-700 pb-1">
+              <span>Month (1st)</span>
+              <span class="text-right">Portfolio → spend (range)</span>
+            </div>
+            ${pastRows.map(m => `
+              <div class="text-xs ${m.isCurrent ? 'font-semibold' : ''}">
+                <div class="flex justify-between">
+                  <span class="${m.isCurrent ? 'text-emerald-300' : 'text-slate-400'}">${m.label}${m.isCurrent ? ' · now' : ''}</span>
+                  <span class="${m.isCurrent ? 'text-sky-300' : 'text-slate-300'}">${fmtMoney(m.monthly)}/mo</span>
+                </div>
+                <div class="flex justify-between text-[10px] text-slate-500">
+                  <span>Port. ${fmtMoney(m.portfolio)}</span>
+                  <span>${fmtMoney(m.monthlyMin)}–${fmtMoney(m.monthlyMax)}</span>
+                </div>
+              </div>`).join('')}
+          </div>
+          <p class="text-[10px] text-slate-600 mt-2">Each month uses base rate ${(profile.baseRate * 100).toFixed(1)}% on that month’s portfolio; range is ±20% rails (Guyton–Klinger band).</p>
+        </div>`;
+      } catch (e) {
+        console.warn(e);
+        pastHtml = `<div class="card p-3 mb-3 text-xs text-rose-300">Could not load full history (${e.message || e}). Showing current month only. Try Overview → Refresh prices or add a Finnhub key.</div>`;
+      }
 
       const html = `
         <div class="card p-3 mb-3 text-xs text-slate-400 leading-relaxed">
           <strong class="text-slate-300">Guardrails spending</strong> (Guyton–Klinger style):
-          risk-based withdrawal rate, then raise or cut when markets move enough to hit the rails.
-          <strong class="text-slate-300">Recalculates whenever you refresh prices</strong> or portfolio values change
-          (Overview → Refresh prices), and when you open this tab after a material move.
+          risk-based withdrawal rate on portfolio value.
+          <strong class="text-slate-300">Past 12 months</strong> use first-of-month reconstructed portfolio values from historical prices.
           <span class="text-amber-300/90">Not financial advice</span>.
         </div>
 
@@ -4131,20 +4327,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
           </ul>
         </div>
 
-        <div class="card p-3 mb-3">
-          <h3 class="text-sm font-semibold text-slate-300 mb-1">Next 12 months</h3>
-          <p class="text-[10px] text-slate-500 mb-2">Recommended is inside the rail range. Range moves when portfolio value changes.</p>
-          <div class="space-y-1">
-            ${g.months.map(m => `
-              <div class="flex justify-between text-xs ${m.isCurrent ? 'font-semibold' : ''}">
-                <span class="${m.isCurrent ? 'text-emerald-300' : 'text-slate-400'}">${m.label}${m.isCurrent ? ' · now' : ''}</span>
-                <span class="text-right">
-                  <span class="${m.isCurrent ? 'text-sky-300' : 'text-slate-300'}">${fmtMoney(m.amount)}</span>
-                  <span class="text-slate-500 text-[10px]"> (${fmtMoney(m.min)}–${fmtMoney(m.max)})</span>
-                </span>
-              </div>`).join('')}
-          </div>
-        </div>
+        ${pastHtml}
 
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold text-slate-300 mb-2">Settings</h3>
@@ -4166,17 +4349,25 @@ VTI,50,240.00,13250.00,Capital One Investing`
             <button type="button" id="btnBudgetReset"
               class="text-sm font-semibold border border-slate-600 text-slate-300 rounded-lg py-2">Reset rails</button>
           </div>
+          <button type="button" id="btnBudgetReloadHist"
+            class="mt-2 w-full text-sm font-semibold border border-sky-700 text-sky-300 rounded-lg py-2">Reload past 12 months</button>
         </div>
 
         <div class="card p-3 text-[11px] text-slate-500 leading-relaxed mb-2">
           <strong class="text-slate-400">Rules used:</strong>
           Base rate from equity mix (3.5% / 4.0% / 4.5%).
-          If portfolio jumps ≥12% since last review → +5% spend; drops ≥10% → −5%.
-          If withdrawal rate exceeds ±20% of the base rate vs current portfolio → adjust toward the base (Guyton–Klinger decision rules).
-          Optional January inflation raise. Refresh prices on Overview for a fresher portfolio level.
+          Past months: portfolio on ~1st trading day × base rate (±20% rail band).
+          Assumes today’s share counts held constant (no buys/sells). Cash &amp; annuities flat.
         </div>
       `;
       $('#panel-budget').innerHTML = html;
+
+      const reloadHist = document.getElementById('btnBudgetReloadHist');
+      if (reloadHist) reloadHist.onclick = () => {
+        histMonthCache = {};
+        renderBudget();
+        toast('Reloading history…');
+      };
 
       const applyBtn = document.getElementById('btnBudgetApply');
       if (applyBtn) applyBtn.onclick = () => {

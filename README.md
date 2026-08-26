@@ -3,7 +3,7 @@
 Fully **client-side** portfolio tool for iPhone Safari (and desktop).  
 Statements and balances **never leave your device**.
 
-**Current version:** **v55**
+**Current version:** **v57**
 
 ---
 
@@ -16,10 +16,10 @@ Statements and balances **never leave your device**.
    - `xlsx.min.js`
    - `apple-touch-icon.png`, `favicon.png`, `icon-192.png` (home-screen icons)
 2. **Settings → Pages → Deploy from branch** (root).
-3. Open: `https://YOUR-USER.github.io/YOUR-REPO/?v=55`
+3. Open: `https://YOUR-USER.github.io/YOUR-REPO/?v=57`
 4. Safari → Share → **Add to Home Screen**.
 
-After updates, bump `?v=55` (or clear Website Data for the site).
+After updates, bump `?v=57` (or clear Website Data for the site).
 
 ### Privacy when sharing the link
 
@@ -27,7 +27,7 @@ The URL only serves **app code**. Positions, prices, home values, Roth/Budget in
 
 ---
 
-## Features (v55)
+## Features (v57)
 
 ### Load accounts
 - Multiple **CSV / Excel** files: **Fidelity**, **E\*TRADE**, **RW Baird**, similar brokers
@@ -66,7 +66,7 @@ The URL only serves **app code**. Positions, prices, home values, Roth/Budget in
 - **Safe spend range** this month (lower rail – upper rail) + recommended amount inside the band
 - Re-evaluates when you **refresh prices** or portfolio value moves
 - Optional inflation (January), include-home toggle, manual override, reset rails
-- Next-12-months schedule
+- Past 12 months safe spend (first-of-month portfolio × base rate)
 
 ### Roth
 - Birth year → RMD age (SECURE 2.0: **75** if born 1960+)
@@ -82,7 +82,7 @@ The URL only serves **app code**. Positions, prices, home values, Roth/Budget in
 
 Browsers block direct Yahoo Finance calls (**CORS**). Older builds hit dead or rate-limited proxies (`corsproxy.io` keyless URLs, allorigins bursts with 4 parallel workers), so most symbols failed while a few succeeded.
 
-**v55 changes:**
+**v57 changes:**
 1. Try **direct Yahoo** (query1 / query2), then **allorigins `/get`** (parse `contents`), then **allorigins `/raw`**
 2. **Retry once** on transient failures
 3. **2 paced workers** (~120 ms between symbols) instead of a 4-wide blast
