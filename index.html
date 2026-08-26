@@ -66,7 +66,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v57</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v58</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -4255,9 +4255,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
           const sp = spendForPortfolio(r.portfolio, profile);
           return { ...r, ...sp };
         });
-        // Current month recommended from live guardrails (may differ slightly from pure base×portfolio)
-        const cur = pastRows[pastRows.length - 1];
-        pastNote = `Reconstructed from current share counts × first trading-day close each month (${series.symbols} symbols priced). Cash/annuities/CUSIPs held flat. Home ${s0.includeHome ? 'included' : 'excluded'}.`;
+        // Current month must match the live guardrails card (same portfolio + recommended spend)
+        if (pastRows.length) {
+          const last = pastRows[pastRows.length - 1];
+          last.portfolio = g.portfolioNow;
+          last.monthly = g.monthly;
+          last.monthlyMin = g.monthlyMin;
+          last.monthlyMax = g.monthlyMax;
+          last.annual = g.annual;
+          last.isCurrent = true;
+          last.fromGuardrails = true;
+        }
+        pastNote = `Prior months: current share counts × first trading-day close (${series.symbols} symbols). Cash/annuities/CUSIPs flat. Home ${s0.includeHome ? 'included' : 'excluded'}. <strong class="text-slate-400">This month</strong> matches the recommended figure above (live guardrails).`;
         pastHtml = `
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold text-slate-300 mb-1">Past 12 months · safe spend</h3>
@@ -4279,7 +4288,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
                 </div>
               </div>`).join('')}
           </div>
-          <p class="text-[10px] text-slate-600 mt-2">Each month uses base rate ${(profile.baseRate * 100).toFixed(1)}% on that month’s portfolio; range is ±20% rails (Guyton–Klinger band).</p>
+          <p class="text-[10px] text-slate-600 mt-2">Prior months use base rate ${(profile.baseRate * 100).toFixed(1)}% × that month’s portfolio (±20% rails). Current month uses the same recommended amount as the card above.</p>
         </div>`;
       } catch (e) {
         console.warn(e);
