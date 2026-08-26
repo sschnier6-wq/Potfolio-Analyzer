@@ -66,7 +66,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v58</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v59</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -4223,6 +4223,72 @@ VTI,50,240.00,13250.00,Capital One Investing`
       };
     }
 
+    /**
+     * Walk month-by-month with the same Guyton–Klinger rules as applyGuardrails:
+     * start at base×first portfolio; each month apply −5% / +5% on big moves,
+     * then clamp rate into [0.8, 1.2]× base vs that month’s portfolio.
+     * Returns mid-target (recommended) for each month.
+     */
+    function backCalcGuardrailsSeries(rows, profile) {
+      const base = profile.baseRate;
+      const lower = base * 0.80;
+      const upper = base * 1.20;
+      if (!rows.length) return [];
+
+      let annual = rows[0].portfolio * base; // start at base rate
+      let lastPort = rows[0].portfolio;
+      const out = [];
+
+      rows.forEach((r, idx) => {
+        const port = Math.max(0, r.portfolio || 0);
+        const note = [];
+        if (idx === 0) {
+          note.push('Start at base rate');
+        } else if (lastPort > 0) {
+          const perf = (port - lastPort) / lastPort;
+          if (perf <= -0.10) {
+            annual = annual * 0.95;
+            note.push(`Port ${(perf * 100).toFixed(1)}% → −5% spend`);
+          } else if (perf >= 0.12) {
+            annual = annual * 1.05;
+            note.push(`Port +${(perf * 100).toFixed(1)}% → +5% spend`);
+          }
+        }
+
+        // Rate rails vs this month's portfolio
+        let rate = port > 0 ? annual / port : base;
+        if (port > 0 && rate > upper) {
+          annual = port * base;
+          rate = base;
+          note.push('Above upper → cut to base');
+        } else if (port > 0 && rate < lower) {
+          annual = port * lower;
+          rate = lower;
+          note.push('Below lower → raise to lower rail');
+        }
+        // Final clamp
+        const minA = port * lower;
+        const maxA = port * upper;
+        if (annual < minA) annual = minA;
+        if (annual > maxA) annual = maxA;
+        rate = port > 0 ? annual / port : base;
+
+        out.push({
+          ...r,
+          annual,
+          monthly: annual / 12,
+          monthlyMin: minA / 12,
+          monthlyMax: maxA / 12,
+          rate,
+          lowerRate: lower,
+          upperRate: upper,
+          note: note.join('; ') || 'Held'
+        });
+        lastPort = port;
+      });
+      return out;
+    }
+
     async function renderBudget() {
       const data = viewHoldings();
       const invTotal = data.reduce((s, p) => s + (p.market_value || 0), 0);
@@ -4251,11 +4317,14 @@ VTI,50,240.00,13250.00,Capital One Investing`
       let pastNote = '';
       try {
         const series = await buildPast12MonthPortfolioSeries(!!s0.includeHome);
-        const pastRows = series.rows.map(r => {
-          const sp = spendForPortfolio(r.portfolio, profile);
-          return { ...r, ...sp };
+        // Use live portfolio for current month so the path ends on today's number
+        const rowsForCalc = series.rows.map((r, i) => {
+          if (i === series.rows.length - 1) return { ...r, portfolio: g.portfolioNow };
+          return r;
         });
-        // Current month must match the live guardrails card (same portfolio + recommended spend)
+        // Sequential Guyton–Klinger back-calc (same rules as live card)
+        let pastRows = backCalcGuardrailsSeries(rowsForCalc, profile);
+        // Pin current month display to live guardrails card exactly
         if (pastRows.length) {
           const last = pastRows[pastRows.length - 1];
           last.portfolio = g.portfolioNow;
@@ -4263,10 +4332,12 @@ VTI,50,240.00,13250.00,Capital One Investing`
           last.monthlyMin = g.monthlyMin;
           last.monthlyMax = g.monthlyMax;
           last.annual = g.annual;
+          last.rate = g.portfolioNow > 0 ? g.annual / g.portfolioNow : profile.baseRate;
           last.isCurrent = true;
           last.fromGuardrails = true;
+          last.note = 'Live guardrails';
         }
-        pastNote = `Prior months: current share counts × first trading-day close (${series.symbols} symbols). Cash/annuities/CUSIPs flat. Home ${s0.includeHome ? 'included' : 'excluded'}. <strong class="text-slate-400">This month</strong> matches the recommended figure above (live guardrails).`;
+        pastNote = `Portfolio from share counts × first trading-day close (${series.symbols} symbols). Mid target walks the same rules as above: −5% if port ≤−10%, +5% if ≥+12%, then clamp rate to ${(profile.baseRate * 0.8 * 100).toFixed(1)}–${(profile.baseRate * 1.2 * 100).toFixed(1)}%. Home ${s0.includeHome ? 'included' : 'excluded'}.`;
         pastHtml = `
         <div class="card p-3 mb-3">
           <h3 class="text-sm font-semibold text-slate-300 mb-1">Past 12 months · safe spend</h3>
@@ -4274,7 +4345,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
           <div class="space-y-1.5">
             <div class="flex justify-between text-[10px] text-slate-500 border-b border-slate-700 pb-1">
               <span>Month (1st)</span>
-              <span class="text-right">Portfolio → spend (range)</span>
+              <span class="text-right">Mid target (range) · rate</span>
             </div>
             ${pastRows.map(m => `
               <div class="text-xs ${m.isCurrent ? 'font-semibold' : ''}">
@@ -4284,11 +4355,11 @@ VTI,50,240.00,13250.00,Capital One Investing`
                 </div>
                 <div class="flex justify-between text-[10px] text-slate-500">
                   <span>Port. ${fmtMoney(m.portfolio)}</span>
-                  <span>${fmtMoney(m.monthlyMin)}–${fmtMoney(m.monthlyMax)}</span>
+                  <span>${fmtMoney(m.monthlyMin)}–${fmtMoney(m.monthlyMax)} · ${((m.rate || 0) * 100).toFixed(2)}%</span>
                 </div>
               </div>`).join('')}
           </div>
-          <p class="text-[10px] text-slate-600 mt-2">Prior months use base rate ${(profile.baseRate * 100).toFixed(1)}% × that month’s portfolio (±20% rails). Current month uses the same recommended amount as the card above.</p>
+          <p class="text-[10px] text-slate-600 mt-2">Mid target is the sequential guardrails recommendation (not always base ${(profile.baseRate * 100).toFixed(1)}%). Current month matches the card above.</p>
         </div>`;
       } catch (e) {
         console.warn(e);
