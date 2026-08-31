@@ -3,7 +3,7 @@
 Fully **client-side** portfolio tool for iPhone Safari (and desktop).  
 Statements and balances **never leave your device**.
 
-**Current version:** **v57**
+**Current version:** **v63**
 
 ---
 
@@ -16,10 +16,10 @@ Statements and balances **never leave your device**.
    - `xlsx.min.js`
    - `apple-touch-icon.png`, `favicon.png`, `icon-192.png` (home-screen icons)
 2. **Settings → Pages → Deploy from branch** (root).
-3. Open: `https://YOUR-USER.github.io/YOUR-REPO/?v=57`
+3. Open: `https://YOUR-USER.github.io/YOUR-REPO/?v=63`
 4. Safari → Share → **Add to Home Screen**.
 
-After updates, bump `?v=57` (or clear Website Data for the site).
+After updates, bump `?v=63` (or clear Website Data for the site).
 
 ### Privacy when sharing the link
 
@@ -27,7 +27,7 @@ The URL only serves **app code**. Positions, prices, home values, Roth/Budget in
 
 ---
 
-## Features (v57)
+## Features (v63)
 
 ### Load accounts
 - Multiple **CSV / Excel** files: **Fidelity**, **E\*TRADE**, **RW Baird**, similar brokers
@@ -38,14 +38,10 @@ The URL only serves **app code**. Positions, prices, home values, Roth/Budget in
 ### Overview
 - Metrics: investments, home, net-ish total, tickers / accounts
 - **Live-ish valuation**
-  - **↻ Refresh prices** button
-  - **Pull down from the top of the screen** (iPhone) to refresh prices
-  - Yahoo prior close via CORS-safe proxies (paced requests + retries)
-  - Cash / money markets @ $1
-  - Lincoln / Jackson index annuities scaled by **SPY** vs statement baseline
-  - Failed symbols listed when some tickers can’t be priced
-- **Asset class mix** pie + detail
-- **Equity / style mix** pie (growth, large, small, international, bonds, …)
+  - **↻ Refresh prices** and **pull-down** on iPhone
+  - Yahoo / Nasdaq / optional Finnhub key
+  - Cash @ $1; Lincoln / Jackson annuities scaled by SPY
+- **Asset class mix** and **equity / style mix** pies
 - Allocation by account, top holdings
 
 ### Positions
@@ -58,38 +54,26 @@ The URL only serves **app code**. Positions, prices, home values, Roth/Budget in
 - Overlap / **HHI** concentration + diversity commentary
 
 ### Optimize
-- Peer / lower-cost alternatives with research links (Yahoo, Morningstar, ETF.com)
+- Peer / lower-cost alternatives with research links
 
-### Budget (left of Roth)
-- **Guyton–Klinger-style guardrails**
-- Base rate from equity mix: **3.5% / 4.0% / 4.5%**
-- **Safe spend range** this month (lower rail – upper rail) + recommended amount inside the band
-- Re-evaluates when you **refresh prices** or portfolio value moves
-- Optional inflation (January), include-home toggle, manual override, reset rails
-- Past 12 months safe spend (first-of-month portfolio × base rate)
+### Budget
+- **Guyton–Klinger-style guardrails** (3.5% / 4.0% / 4.5% by equity mix)
+- Safe spend **range** + recommended amount
+- **Past 12 months** reconstructed from first-of-month prices
+- One sequential walk; current month is the last step of that walk
 
 ### Roth
 - Birth year → RMD age (SECURE 2.0: **75** if born 1960+)
-- Auto-detects Traditional IRA / 401(k) / Roth / taxable from account names
-- Year-by-year conversions to a chosen federal bracket
-- **Automatically compares avoid-IRMAA vs full-bracket** and picks the lower estimated all-in cost
-- IRMAA / NIIT notes; spending schedule (IRA / 401k / Roth balances + RMD)
-- First-RMD with-plan vs no-conversion summary
-
----
-
-## Why price refresh was failing (and the fix)
-
-Browsers block direct Yahoo Finance calls (**CORS**). Older builds hit dead or rate-limited proxies (`corsproxy.io` keyless URLs, allorigins bursts with 4 parallel workers), so most symbols failed while a few succeeded.
-
-**v57 changes:**
-1. Try **direct Yahoo** (query1 / query2), then **allorigins `/get`** (parse `contents`), then **allorigins `/raw`**
-2. **Retry once** on transient failures
-3. **2 paced workers** (~120 ms between symbols) instead of a 4-wide blast
-4. List **failed tickers** under Live-ish valuation
-5. **Pull-to-refresh** from the top of the page on iPhone
-
-CUSIPs, internal `NON*` codes, and unmapped symbols still use **statement value** (not priced).
+- Detects Traditional IRA, 401(k), Roth, taxable from account names
+- Year-by-year conversions; auto-compares avoid-IRMAA vs full-bracket
+- Spending schedule (IRA / 401(k) / Roth balances + RMD)
+- First-RMD with-plan vs no-conversion snapshot
+- **RMD-era tax table, first RMD year through age 95**
+  - Each year: RMD if you leave 401(k)/IRA in place, tax on that RMD, tax if you follow the conversion plan, tax saved
+  - Summary: sum of RMDs, sum of taxes with/without conversions, **total RMD-era tax saved through age 95**
+  - Uses IRS Uniform Lifetime Table divisors through age 95 and the plan growth rate
+  - **Net tax savings of conversions** = RMD-era tax avoided − conversion tax paid before RMDs (spending withdrawals excluded from that conversion-tax figure)
+  - Not present-valued; estimates only
 
 ---
 

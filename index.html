@@ -66,7 +66,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v61</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v63</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -3269,9 +3269,52 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
     // Uniform Lifetime Table (approx) — age → divisor
     const RMD_DIVISORS = {
+      // IRS Uniform Lifetime Table (Pub. 590-B, 2022+)
       72: 27.4, 73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1,
-      80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0
+      80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0,
+      86: 15.2, 87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2,
+      91: 11.5, 92: 10.8, 93: 10.1, 94: 9.5, 95: 8.9,
+      96: 8.4, 97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4
     };
+
+    function rmdDivisor(age) {
+      const a = Math.round(Number(age) || 0);
+      if (RMD_DIVISORS[a]) return RMD_DIVISORS[a];
+      if (a >= 100) return 6.4;
+      if (a >= 75) return 24.6;
+      return 27.4;
+    }
+
+    /**
+     * From first RMD year through endYear: take Uniform Lifetime RMD each year,
+     * then grow the leftover. startBal is the pre-tax pot just before the first RMD
+     * (already grown through that year).
+     */
+    function projectRmdHorizon(opts) {
+      const {
+        startBal, rmdStartYear, endYear, birthYear,
+        growth, otherIncome, ssIncome, filing, stateRate
+      } = opts;
+      let bal = Math.max(0, startBal || 0);
+      const rows = [];
+      let totalRmd = 0, totalTax = 0;
+      for (let y = rmdStartYear; y <= endYear; y++) {
+        if (y > rmdStartYear) bal *= (1 + growth);
+        const age = y - birthYear;
+        let rmd = 0, tax = 0;
+        if (bal > 0) {
+          const div = rmdDivisor(age);
+          rmd = Math.min(bal, bal / div);
+          const base = (otherIncome || 0) + (age >= 67 && ssIncome ? ssIncome * 0.85 : 0);
+          tax = taxOnOrdinary(rmd, base, filing, stateRate);
+          bal = Math.max(0, bal - rmd);
+        }
+        totalRmd += rmd;
+        totalTax += tax;
+        rows.push({ year: y, age, rmd, tax, endBal: bal, divisor: rmdDivisor(age) });
+      }
+      return { rows, totalRmd, totalTax, endBal: bal };
+    }
 
     function classifyAccountTaxType(p) {
       const a = String(p.account || '').toUpperCase();
@@ -3527,7 +3570,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const bracketTop = bracketCeiling(filing, targetRate);
 
       const years = [];
-      let totalConverted = 0, totalTax = 0, totalSpend = 0;
+      let totalConverted = 0, totalTax = 0, totalSpend = 0, totalConvertTax = 0;
 
       // Withdraw from pre-tax: IRA first, then 401k (typical rollover/planning order)
       function takePreTax(amount) {
@@ -3563,7 +3606,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
         let rmd = 0;
         if (isRmdYear && trad > 0) {
-          const div = RMD_DIVISORS[Math.min(85, Math.max(72, age))] || (age >= 75 ? 24.6 : 26.5);
+          const div = rmdDivisor(age);
           rmd = trad / div;
         }
 
@@ -3632,6 +3675,8 @@ VTI,50,240.00,13250.00,Capital One Investing`
         }
 
         const tax = taxOnOrdinary(tradWithdraw + convert, baseInc, filing, stateRate);
+        const taxSpendOnly = taxOnOrdinary(tradWithdraw, baseInc, filing, stateRate);
+        const convertTax = Math.max(0, tax - taxSpendOnly);
         let penalty = 0;
         if (!canPenaltyFree && fromTrad > 0) penalty = fromTrad * 0.10;
 
@@ -3646,6 +3691,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
         totalConverted += convert;
         totalTax += tax + penalty;
+        totalConvertTax += convertTax;
         totalSpend += (spendTarget - need);
 
         years.push({
@@ -3675,15 +3721,64 @@ VTI,50,240.00,13250.00,Capital One Investing`
         k401No *= (1 + effG);
       }
       const balNo = iraNo + k401No;
-      const div0 = RMD_DIVISORS[Math.floor(rmdAge)] || 24.6;
+      const div0 = rmdDivisor(Math.floor(rmdAge));
       const firstRmdNo = balNo > 0 ? balNo / div0 : 0;
-      const rmdTaxNo = taxOnOrdinary(firstRmdNo, otherIncome, filing, stateRate);
+      const rmdTaxNo = taxOnOrdinary(firstRmdNo, otherIncome + ((birthYear + Math.floor(rmdAge) >= 67 && ssIncome) ? ssIncome * 0.85 : 0), filing, stateRate);
+
+      // Horizon: first RMD year through age 95 (no further conversions)
+      const age95Year = birthYear + 95;
+      const noConvHorizon = projectRmdHorizon({
+        startBal: balNo, // already grown through first RMD year
+        rmdStartYear: rmdYear,
+        endYear: age95Year,
+        birthYear,
+        growth: effG,
+        otherIncome, ssIncome, filing, stateRate
+      });
+      const withPlanHorizon = projectRmdHorizon({
+        startBal: balAtRmd, // remaining trad just before first RMD after conversions
+        rmdStartYear: rmdYear,
+        endYear: age95Year,
+        birthYear,
+        growth: effG,
+        otherIncome, ssIncome, filing, stateRate
+      });
+      const noFromRmd = noConvHorizon.rows;
+      const withMap = {};
+      withPlanHorizon.rows.forEach(r => { withMap[r.year] = r; });
+      const rmdHorizon = noFromRmd.map(n => {
+        const w = withMap[n.year] || { rmd: 0, tax: 0, endBal: 0 };
+        return {
+          year: n.year,
+          age: n.age,
+          divisor: n.divisor,
+          rmdNo: n.rmd,
+          taxNo: n.tax,
+          balNo: n.endBal,
+          rmdWith: w.rmd || 0,
+          taxWith: w.tax || 0,
+          balWith: w.endBal || 0,
+          taxSaved: Math.max(0, (n.tax || 0) - (w.tax || 0)),
+          rmdSaved: Math.max(0, (n.rmd || 0) - (w.rmd || 0))
+        };
+      });
+      const horizonTotals = rmdHorizon.reduce((a, r) => {
+        a.rmdNo += r.rmdNo;
+        a.taxNo += r.taxNo;
+        a.rmdWith += r.rmdWith;
+        a.taxWith += r.taxWith;
+        a.taxSaved += r.taxSaved;
+        a.rmdSaved += r.rmdSaved;
+        return a;
+      }, { rmdNo: 0, taxNo: 0, rmdWith: 0, taxWith: 0, taxSaved: 0, rmdSaved: 0 });
 
       return {
         birthYear, rmdAge, ageNow, rmdYear, age59Year, spendStartYear, spendStartAge,
-        years, totalConverted, totalTax, totalSpend,
+        age95Year,
+        years, totalConverted, totalTax, totalConvertTax, totalSpend,
         firstRmd, balAtRmd, rmdTax,
         balNo, firstRmdNo, rmdTaxNo,
+        rmdHorizon, horizonTotals,
         effG, equityPct, tradStart, iraStart, k401Start,
         taxableStart: buckets['Taxable / other'] || 0,
         rothStart: buckets['Roth'] || 0,
@@ -3947,8 +4042,65 @@ VTI,50,240.00,13250.00,Capital One Investing`
           </div>
           <p class="text-[10px] text-slate-500 mt-2 leading-snug">
             Effective growth ${fmt(plan.effG * 100, 1)}%/yr (pre-tax equity share ${fmt(plan.equityPct * 100, 0)}% at ${s.growth}%, bonds lower).
-            Divisor at age ${Math.floor(plan.rmdAge)} ≈ ${RMD_DIVISORS[Math.floor(plan.rmdAge)] || '—'}.
+            Divisor at age ${Math.floor(plan.rmdAge)} ≈ ${rmdDivisor(Math.floor(plan.rmdAge))}.
             Starting IRA ${fmtMoney(plan.iraStart)} · 401(k) ${fmtMoney(plan.k401Start)}.
+          </p>
+        </div>
+
+        <div class="card p-3 mb-3 border border-emerald-800/40">
+          <h3 class="text-sm font-semibold text-emerald-300 mb-1">RMD taxes · age ${Math.floor(plan.rmdAge)}–95 (no 401(k)/IRA → Roth)</h3>
+          <p class="text-[10px] text-slate-500 mb-2 leading-snug">
+            If you leave pre-tax money in place, Uniform Lifetime RMDs continue through age 95.
+            “Tax if no Roth conversions” is ordinary tax on that year’s RMD (plus your other income / SS).
+            “Tax if you follow plan” uses leftover traditional balance after conversions.
+            <span class="text-slate-400">RMD-window only — does not subtract conversion tax you pay before ${plan.rmdYear}.</span>
+          </p>
+          ${plan.rmdHorizon && plan.rmdHorizon.length ? `
+          <div class="overflow-x-auto">
+            <table class="w-full text-[10px]">
+              <thead><tr class="text-slate-500">
+                <th class="py-1 pr-1 text-left">Year</th>
+                <th class="py-1 pr-1 text-left">Age</th>
+                <th class="py-1 pr-1 text-right">RMD no conv.</th>
+                <th class="py-1 pr-1 text-right">Tax no conv.</th>
+                <th class="py-1 pr-1 text-right">Tax w/ plan</th>
+                <th class="py-1 pr-1 text-right">Tax saved</th>
+              </tr></thead>
+              <tbody>
+                ${plan.rmdHorizon.map(r => `
+                  <tr class="border-t border-slate-700">
+                    <td class="py-1 pr-1 text-slate-300">${r.year}</td>
+                    <td class="py-1 pr-1 text-slate-400">${r.age}</td>
+                    <td class="py-1 pr-1 text-right text-amber-200">${fmtMoney(r.rmdNo)}</td>
+                    <td class="py-1 pr-1 text-right text-rose-300">${fmtMoney(r.taxNo)}</td>
+                    <td class="py-1 pr-1 text-right text-slate-400">${fmtMoney(r.taxWith)}</td>
+                    <td class="py-1 pr-1 text-right text-emerald-300">${fmtMoney(r.taxSaved)}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="mt-2 pt-2 border-t border-slate-700 space-y-1 text-xs">
+            <div class="flex justify-between"><span class="text-slate-400">Sum of RMDs (no conversions, ${plan.rmdYear}–${plan.age95Year})</span><span class="text-amber-200">${fmtMoney(plan.horizonTotals.rmdNo)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Sum of RMD tax if no conversions</span><span class="text-rose-300">${fmtMoney(plan.horizonTotals.taxNo)}</span></div>
+            <div class="flex justify-between"><span class="text-slate-400">Sum of RMD tax if you follow plan</span><span class="text-slate-300">${fmtMoney(plan.horizonTotals.taxWith)}</span></div>
+            <div class="flex justify-between font-semibold">
+              <span class="text-emerald-300">Total RMD-era tax saved (thru age 95)</span>
+              <span class="text-emerald-300">${fmtMoney(plan.horizonTotals.taxSaved)}</span>
+            </div>
+            <div class="flex justify-between pt-1">
+              <span class="text-slate-400">Conversion tax paid before RMDs</span>
+              <span class="text-rose-300">− ${fmtMoney(plan.totalConvertTax || 0)}</span>
+            </div>
+            <div class="flex justify-between font-semibold ${((plan.horizonTotals.taxSaved || 0) - (plan.totalConvertTax || 0)) >= 0 ? 'text-emerald-300' : 'text-rose-300'}">
+              <span>Net tax savings of doing conversions</span>
+              <span>${fmtMoney((plan.horizonTotals.taxSaved || 0) - (plan.totalConvertTax || 0))}</span>
+            </div>
+          </div>
+          ` : `<p class="text-xs text-slate-500">Enter birth year to project RMDs through age 95.</p>`}
+          <p class="text-[10px] text-slate-600 mt-2 leading-snug">
+            Balances grow at ${fmt(plan.effG * 100, 1)}%/yr, then RMD is withdrawn each year (divisor from the IRS Uniform Lifetime Table).
+            Tax uses your filing status, other income, and ${s.stateTax || 0}% state rate.
+            Net = RMD-era tax avoided − extra tax paid on conversions (not spending withdrawals). Estimates only; no present-value discount.
           </p>
         </div>
 
