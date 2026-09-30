@@ -3,7 +3,7 @@
 Fully **client-side** portfolio tool for iPhone Safari (and desktop).  
 Statements and balances **never leave your device**.
 
-**Current version:** **v63**
+**Current version:** **v64**
 
 ---
 
@@ -27,7 +27,7 @@ The URL only serves **app code**. Positions, prices, home values, Roth/Budget in
 
 ---
 
-## Features (v63)
+## Features (v64)
 
 ### Load accounts
 - Multiple **CSV / Excel** files: **Fidelity**, **E\*TRADE**, **RW Baird**, similar brokers

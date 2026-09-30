@@ -66,7 +66,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v63</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v64</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1828,8 +1828,26 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return { price: Number(price), dayPrev, asOf, meta };
     }
 
+    const BUILTIN_FINNHUB_KEY = 'da713cpr01qqqkkhm600da713cpr01qqqkkhm60g';
+
+    async function fetchWithTimeout(url, opts, ms) {
+      opts = opts || {};
+      ms = ms || 8000;
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), ms);
+      try {
+        return await fetch(url, Object.assign({}, opts, { signal: ctrl.signal, cache: 'no-store' }));
+      } finally {
+        clearTimeout(id);
+      }
+    }
+
     function getFinnhubKey() {
-      try { return (localStorage.getItem('portfolio_finnhub_key') || '').trim(); } catch (_) { return ''; }
+      try {
+        const custom = (localStorage.getItem('portfolio_finnhub_key') || '').trim();
+        if (custom) return custom;
+      } catch (_) {}
+      return BUILTIN_FINNHUB_KEY;
     }
     function setFinnhubKey(k) {
       try {
@@ -1840,21 +1858,17 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
     async function fetchViaCorsProxies(targetUrl) {
       const proxies = [
-        // Browser-oriented proxies (need Origin; work on iPhone Safari, not from servers)
-        (u) => `https://proxy.cors.sh/${u}`,
         (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
         (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
-        (u) => `https://api.allorigins.win/get?url=${encodeURIComponent(u)}`,
       ];
       let lastErr = null;
       for (const build of proxies) {
         try {
-          const res = await fetch(build(targetUrl), { cache: 'no-store', mode: 'cors' });
+          const res = await fetchWithTimeout(build(targetUrl), { mode: 'cors' }, 5000);
           if (!res.ok) throw new Error('proxy HTTP ' + res.status);
           const text = await res.text();
           let data;
           try { data = JSON.parse(text); } catch (_) {
-            // allorigins /get wraps as { contents: "..." }
             const wrap = JSON.parse(text);
             data = typeof wrap.contents === 'string' ? JSON.parse(wrap.contents) : wrap.contents;
           }
@@ -1870,27 +1884,18 @@ VTI,50,240.00,13250.00,Capital One Investing`
     async function fetchYahooJson(symbol, range = '10d', interval = '1d') {
       const t = encodeURIComponent(symbol);
       const q = `interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(range)}`;
-      const paths = [
-        `https://query1.finance.yahoo.com/v8/finance/chart/${t}?${q}`,
-        `https://query2.finance.yahoo.com/v8/finance/chart/${t}?${q}`,
-      ];
-      let lastErr = null;
-      for (const yahoo of paths) {
-        try {
-          const res = await fetch(yahoo, { cache: 'no-store', mode: 'cors', headers: { Accept: 'application/json' } });
-          if (res.ok) {
-            const data = await res.json();
-            if (data?.chart?.result?.[0]) return data;
-          }
-        } catch (e) { lastErr = e; }
-        try {
-          const data = await fetchViaCorsProxies(yahoo);
+      const yahoo = `https://query1.finance.yahoo.com/v8/finance/chart/${t}?${q}`;
+      try {
+        const res = await fetchWithTimeout(yahoo, { mode: 'cors', headers: { Accept: 'application/json' } }, 6000);
+        if (res.ok) {
+          const data = await res.json();
           if (data?.chart?.result?.[0]) return data;
-        } catch (e) { lastErr = e; }
-      }
-      throw lastErr || new Error('yahoo unreachable');
+        }
+      } catch (_) {}
+      const data = await fetchViaCorsProxies(yahoo);
+      if (data?.chart?.result?.[0]) return data;
+      throw new Error('yahoo unreachable');
     }
-
     // Cache: symbol -> { ymKey: closePrice } for first trading day of each month
     let histMonthCache = {}; // symbol -> { fetchedAt, byYm: { '202508': price } }
 
@@ -1917,23 +1922,57 @@ VTI,50,240.00,13250.00,Capital One Investing`
       return out;
     }
 
+    function extractFirstOfMonthFromCandles(tsArr, closeArr) {
+      const byYm = {};
+      if (!tsArr || !closeArr) return {};
+      for (let i = 0; i < tsArr.length; i++) {
+        const c = closeArr[i];
+        if (c == null || isNaN(c) || c <= 0) continue;
+        const d = new Date(tsArr[i] * 1000);
+        const key = d.getUTCFullYear() * 100 + (d.getUTCMonth() + 1);
+        if (byYm[key] == null || d.getUTCDate() < byYm[key].day) {
+          byYm[key] = { price: Number(c), day: d.getUTCDate() };
+        }
+      }
+      const out = {};
+      Object.keys(byYm).forEach(k => { out[k] = byYm[k].price; });
+      return out;
+    }
+
+    async function fetchFinnhubCandles(symbol) {
+      const key = getFinnhubKey();
+      if (!key) throw new Error('no finnhub key');
+      const to = Math.floor(Date.now() / 1000);
+      const from = to - 400 * 24 * 3600;
+      const url = `https://finnhub.io/api/v1/stock/candle?symbol=${encodeURIComponent(symbol)}&resolution=D&from=${from}&to=${to}&token=${encodeURIComponent(key)}`;
+      const res = await fetchWithTimeout(url, {}, 8000);
+      if (!res.ok) throw new Error('finnhub candle HTTP ' + res.status);
+      const d = await res.json();
+      if (!d || d.s !== 'ok' || !Array.isArray(d.t) || !Array.isArray(d.c)) throw new Error('finnhub candle empty');
+      return extractFirstOfMonthFromCandles(d.t, d.c);
+    }
+
     async function fetchFirstOfMonthPrices(symbol) {
       const t = String(symbol || '').toUpperCase().trim();
       if (!t) return {};
       const cached = histMonthCache[t];
       if (cached && (Date.now() - cached.fetchedAt) < 6 * 60 * 60 * 1000) return cached.byYm;
       try {
-        // 13mo daily so we have a full prior 12 months + current
-        const data = await fetchYahooJson(t, '13mo', '1d');
-        const byYm = extractFirstOfMonthCloses(data);
+        const byYm = await fetchFinnhubCandles(t);
         histMonthCache[t] = { fetchedAt: Date.now(), byYm };
         return byYm;
-      } catch (e) {
-        console.warn('hist month fail', t, e);
-        return (cached && cached.byYm) || {};
+      } catch (e1) {
+        try {
+          const data = await fetchYahooJson(t, '13mo', '1d');
+          const byYm = extractFirstOfMonthCloses(data);
+          histMonthCache[t] = { fetchedAt: Date.now(), byYm };
+          return byYm;
+        } catch (e) {
+          console.warn('hist month fail', t, e1, e);
+          return (cached && cached.byYm) || {};
+        }
       }
     }
-
     /** Build past 12 month-start portfolio values from current holdings × historical prices */
     async function buildPast12MonthPortfolioSeries(includeHome) {
       const positions = viewHoldings();
@@ -2071,7 +2110,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
       const key = getFinnhubKey();
       if (!key) throw new Error('no finnhub key');
       const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(symbol)}&token=${encodeURIComponent(key)}`;
-      const res = await fetch(url, { cache: 'no-store' });
+      const res = await fetchWithTimeout(url, {}, 8000);
       if (!res.ok) throw new Error('finnhub HTTP ' + res.status);
       const d = await res.json();
       // c = current, pc = previous close
@@ -2132,22 +2171,15 @@ VTI,50,240.00,13250.00,Capital One Investing`
         return finalizePriceResult(t, fh.price, fh.dayPrev, fh.asOf, fh.source, fh.name);
       } catch (e) { errors.push('finnhub:' + (e.message || e)); }
 
-      // 2) Yahoo chart (direct + CORS proxies)
+      // Fallback only if Finnhub misses this symbol (funds / CUSIPs). Time-capped so iPhone cannot hang.
       try {
         const data = await fetchYahooJson(t);
         const { price, dayPrev, asOf, meta } = parseYahooChartPayload(data, t);
         return finalizePriceResult(t, price, dayPrev, asOf, 'yahoo', meta.longName || meta.shortName || t);
       } catch (e) { errors.push('yahoo:' + (e.message || e)); }
 
-      // 3) Nasdaq public quote (last sale / net change → prior close)
-      try {
-        const nq = await fetchNasdaqQuote(t);
-        return finalizePriceResult(t, nq.price, nq.dayPrev, nq.asOf, nq.source, nq.name);
-      } catch (e) { errors.push('nasdaq:' + (e.message || e)); }
-
       throw new Error(errors.join(' | ') || 'fetch failed');
     }
-
     async function refreshAllHomeEstimates() {
       // Manual values only — no online property lookup
       return { msg: '' };
@@ -2170,33 +2202,15 @@ VTI,50,240.00,13250.00,Capital One Investing`
         if (p.statement_value == null && p.market_value != null) p.statement_value = p.market_value;
       });
 
-      // Fetch SPY daily history (proxy for S&P 500)
-      const yahoo = 'https://query1.finance.yahoo.com/v8/finance/chart/SPY?interval=1d&range=3mo';
-      const urls = [
-        yahoo,
-        `https://api.allorigins.win/raw?url=${encodeURIComponent(yahoo)}`,
-        `https://corsproxy.io/?${encodeURIComponent(yahoo)}`,
-      ];
-      let closes = [], timestamps = [];
-      for (const url of urls) {
-        try {
-          const res = await fetch(url, { cache: 'no-store' });
-          if (!res.ok) continue;
-          const data = await res.json();
-          const result = data?.chart?.result?.[0];
-          if (!result) continue;
-          timestamps = result.timestamp || [];
-          closes = (result.indicators?.quote?.[0]?.close || []).map((c, i) => ({ c, t: timestamps[i] }))
-            .filter(x => x.c != null && !isNaN(x.c));
-          if (closes.length >= 2) break;
-        } catch (e) { /* try next */ }
-      }
-      if (closes.length < 2) return { count: 0, msg: ' · annuity SPY scale failed' };
-
-      const spyNow = closes[closes.length - 1].c;
-      const spyNowDate = closes[closes.length - 1].t
-        ? new Date(closes[closes.length - 1].t * 1000).toLocaleDateString()
-        : '';
+      let spyNow = null, spyNowDate = '', closes = [];
+      try {
+        const fh = await fetchFinnhubQuote('SPY');
+        spyNow = fh.price;
+        spyNowDate = fh.asOf || '';
+        if (fh.dayPrev) closes.push({ c: fh.dayPrev, t: Date.now() / 1000 - 86400 });
+        closes.push({ c: spyNow, t: Date.now() / 1000 });
+      } catch (_) {}
+      if (spyNow == null) return { count: 0, msg: ' · annuity SPY scale failed' };
 
       // Baseline SPY: prefer close on/near statement date if we recorded one; else first refresh freezes baseline
       let spyBase = null;
@@ -2281,10 +2295,14 @@ VTI,50,240.00,13250.00,Capital One Investing`
 
     async function refreshMarketPrices() {
       if (window.__priceRefreshBusy) {
-        toast('Refresh already running…');
-        return;
+        const started = window.__priceRefreshStartedAt || 0;
+        if (Date.now() - started < 45000) {
+          toast('Refresh already running…');
+          return;
+        }
       }
       window.__priceRefreshBusy = true;
+      window.__priceRefreshStartedAt = Date.now();
       const data = viewHoldings();
       // Price real tickers AND mapped fund symbols (NON* → FXAIX/FBGRX etc.)
       const tickers = [...new Set(
@@ -2337,16 +2355,15 @@ VTI,50,240.00,13250.00,Capital One Investing`
         }
       }
       const stockJob = (async () => {
-        // 2 concurrent streams with pacing — better success than 4-wide blasts
         const q = [...tickers];
         async function worker() {
           while (q.length) {
             const t = q.shift();
             await priceOne(t);
-            await new Promise(r => setTimeout(r, 120));
+            await new Promise(r => setTimeout(r, 90));
           }
         }
-        await Promise.all([worker(), worker()]);
+        await Promise.all([worker(), worker(), worker()]);
       })();
 
       let homeMsg = '';
@@ -2371,7 +2388,15 @@ VTI,50,240.00,13250.00,Capital One Investing`
         }
       })();
 
-      await Promise.all([stockJob, homeJob, annuityJob]);
+      try {
+        await Promise.race([
+          Promise.all([stockJob, homeJob, annuityJob]),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('refresh timeout')), 40000))
+        ]);
+      } catch (e) {
+        console.warn('refresh ended', e);
+        if (!failed && !updated) failed = tickers.length;
+      }
 
       lastPriceRefresh = {
         at: new Date(),
@@ -2381,7 +2406,6 @@ VTI,50,240.00,13250.00,Capital One Investing`
         asOf: [...asOfDates].filter(Boolean).slice(0, 3).join(', ') || 'prior close'
       };
       try { saveState(); } catch (_) {}
-      // Force Budget tab guardrails to re-run on latest market values
       budgetForceReview = true;
       renderAll();
       toast(
@@ -2471,15 +2495,13 @@ VTI,50,240.00,13250.00,Capital One Investing`
           ${failList}
           <p class="text-[11px] text-slate-500 mt-1">Prices: Finnhub (if key set) → Yahoo → Nasdaq. Cash @ $1. Annuities ≈ SPY-scaled. <span class="text-sky-400">Pull down from the top</span> to refresh.</p>
           <div class="mt-2 pt-2 border-t border-slate-700">
-            <label class="text-[10px] text-slate-500 block">Free Finnhub API key (optional — fixes most failures)
-              <input id="finnhubKeyInput" type="text" placeholder="paste key from finnhub.io" value="${getFinnhubKey()}"
-                class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300 text-xs" />
-            </label>
+            <p class="text-[10px] text-emerald-400">Finnhub price feed is built in — refresh should complete without a pasted key.</p>
+            <p class="text-[10px] text-slate-600 mt-1">Optional override if you want your own key:</p>
+            <input id="finnhubKeyInput" type="password" placeholder="optional override key" value=""
+              class="mt-0.5 w-full bg-slate-800 border border-slate-600 rounded-lg px-2 py-1.5 text-sky-300 text-xs" />
             <div class="flex gap-2 mt-1.5">
-              <button type="button" id="btnSaveFinnhub" class="text-[11px] font-semibold bg-slate-700 hover:bg-slate-600 text-white rounded-lg px-2.5 py-1">Save key</button>
-              <a href="https://finnhub.io/register" target="_blank" rel="noopener" class="text-[11px] text-sky-400 self-center">Get free key ↗</a>
+              <button type="button" id="btnSaveFinnhub" class="text-[11px] font-semibold bg-slate-700 hover:bg-slate-600 text-white rounded-lg px-2.5 py-1">Save override</button>
             </div>
-            <p class="text-[10px] text-slate-600 mt-1">Key stays only on this phone. Free tier is enough for portfolio refresh.</p>
           </div>
         </div>
         <div class="card p-3 mb-3">
@@ -4465,7 +4487,10 @@ VTI,50,240.00,13250.00,Capital One Investing`
       let g; // unified current recommendation (end of 12-mo walk)
 
       try {
-        const series = await buildPast12MonthPortfolioSeries(!!s0.includeHome);
+        const series = await Promise.race([
+          buildPast12MonthPortfolioSeries(!!s0.includeHome),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('history timeout')), 25000))
+        ]);
         // One path only: sequential GK from oldest month → now (live portfolio on last row)
         const rowsForWalk = series.rows.map((r, i) => {
           if (i === series.rows.length - 1) return { ...r, portfolio: portfolioNow };
@@ -4534,11 +4559,59 @@ VTI,50,240.00,13250.00,Capital One Investing`
         </div>`;
       } catch (e) {
         console.warn(e);
-        const forced = budgetForceReview;
-        g = applyGuardrails(s0, portfolioNow, profile, { force: forced });
+        const now = new Date();
+        const fallbackRows = [];
+        for (let i = 11; i >= 0; i--) {
+          const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+          const sp = spendForPortfolio(portfolioNow, profile);
+          fallbackRows.push({
+            label: d.toLocaleString('en-US', { month: 'short', year: 'numeric' }),
+            portfolio: portfolioNow,
+            ...sp,
+            isCurrent: i === 0
+          });
+        }
+        pastRows = fallbackRows;
+        const lower = profile.baseRate * 0.80;
+        const upper = profile.baseRate * 1.20;
+        const baseAnnual = portfolioNow * profile.baseRate;
+        g = {
+          portfolioNow,
+          annual: baseAnnual,
+          monthly: baseAnnual / 12,
+          monthlyMin: (portfolioNow * lower) / 12,
+          monthlyMax: (portfolioNow * upper) / 12,
+          monthlyBase: baseAnnual / 12,
+          currentRate: profile.baseRate,
+          lowerRate: lower,
+          upperRate: upper,
+          profile,
+          perfVsLast: 0,
+          actions: ['History feed timed out — showing 12 months at current portfolio × base rate. Pull to refresh and reopen Budget.']
+        };
         budgetForceReview = false;
-        saveBudgetSettings(g.nextSettings);
-        pastHtml = `<div class="card p-3 mb-3 text-xs text-rose-300">Could not load full history (${e.message || e}). Showing current month from live rules only.</div>`;
+        pastHtml = `
+        <div class="card p-3 mb-3">
+          <h3 class="text-sm font-semibold text-slate-300 mb-1">Past 12 months · safe spend</h3>
+          <p class="text-[10px] text-amber-400 mb-2">Could not finish historical prices (${e.message || e}). Rows use today’s portfolio until refresh succeeds.</p>
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-[10px] text-slate-500 border-b border-slate-700 pb-1">
+              <span>Month (1st)</span>
+              <span class="text-right">Mid target (range) · rate</span>
+            </div>
+            ${pastRows.map(m => `
+              <div class="text-xs ${m.isCurrent ? 'font-semibold' : ''}">
+                <div class="flex justify-between">
+                  <span class="${m.isCurrent ? 'text-emerald-300' : 'text-slate-400'}">${m.label}${m.isCurrent ? ' · now' : ''}</span>
+                  <span class="${m.isCurrent ? 'text-sky-300' : 'text-slate-300'}">${fmtMoney(m.monthly)}/mo</span>
+                </div>
+                <div class="flex justify-between text-[10px] text-slate-500">
+                  <span>Port. ${fmtMoney(m.portfolio)}</span>
+                  <span>${fmtMoney(m.monthlyMin)}–${fmtMoney(m.monthlyMax)} · ${((m.rate || 0) * 100).toFixed(2)}%</span>
+                </div>
+              </div>`).join('')}
+          </div>
+        </div>`;
       }
 
       if (!g) {
