@@ -66,7 +66,7 @@
     <div class="flex items-center justify-between">
       <div>
         <h1 class="text-lg font-bold text-sky-400">📊 Portfolio Analyzer</h1>
-        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v64</p>
+        <p class="text-xs text-slate-400">Local · Private · iPhone-ready · v65</p>
       </div>
       <div class="flex items-center gap-2">
         <button id="btnAddFilesHeader" class="text-xs text-sky-400 border border-sky-600/50 rounded-lg px-2.5 py-1.5 hidden font-semibold">+ Add files</button>
@@ -1961,16 +1961,10 @@ VTI,50,240.00,13250.00,Capital One Investing`
         const byYm = await fetchFinnhubCandles(t);
         histMonthCache[t] = { fetchedAt: Date.now(), byYm };
         return byYm;
-      } catch (e1) {
-        try {
-          const data = await fetchYahooJson(t, '13mo', '1d');
-          const byYm = extractFirstOfMonthCloses(data);
-          histMonthCache[t] = { fetchedAt: Date.now(), byYm };
-          return byYm;
-        } catch (e) {
-          console.warn('hist month fail', t, e1, e);
-          return (cached && cached.byYm) || {};
-        }
+      } catch (e) {
+        console.warn('hist month fail', t, e);
+        histMonthCache[t] = { fetchedAt: Date.now(), byYm: (cached && cached.byYm) || {} };
+        return histMonthCache[t].byYm;
       }
     }
     /** Build past 12 month-start portfolio values from current holdings × historical prices */
@@ -2001,17 +1995,24 @@ VTI,50,240.00,13250.00,Capital One Investing`
       });
 
       // Fetch histories with mild concurrency
-      const symbols = [...symSet];
+      // Cap work so Budget never waits on every fund/CUSIP
+      const symbols = [...symSet].slice(0, 18);
       const histBySym = {};
       const q = [...symbols];
       async function worker() {
         while (q.length) {
           const s = q.shift();
-          histBySym[s] = await fetchFirstOfMonthPrices(s);
-          await new Promise(r => setTimeout(r, 80));
+          try {
+            histBySym[s] = await Promise.race([
+              fetchFirstOfMonthPrices(s),
+              new Promise((_, rej) => setTimeout(() => rej(new Error('sym timeout')), 5000))
+            ]);
+          } catch (_) {
+            histBySym[s] = {};
+          }
         }
       }
-      await Promise.all([worker(), worker()]);
+      await Promise.all([worker(), worker(), worker(), worker()]);
 
       // Latest known price per symbol (for ratio)
       const latestPx = {};
@@ -4476,124 +4477,49 @@ VTI,50,240.00,13250.00,Capital One Investing`
         return;
       }
 
-      // Placeholder while historical series loads
-      $('#panel-budget').innerHTML = `
-        <div class="card p-3 mb-3 text-xs text-slate-400">Loading past 12 months from historical prices…</div>
-        <div class="card p-4 text-center text-slate-500 text-sm">Fetching first-of-month closes…</div>
-      `;
+      const lower = profile.baseRate * 0.80;
+      const upper = profile.baseRate * 1.20;
+      const baseAnnual = portfolioNow * profile.baseRate;
+      const g = {
+        portfolioNow,
+        annual: baseAnnual,
+        monthly: baseAnnual / 12,
+        monthlyMin: (portfolioNow * lower) / 12,
+        monthlyMax: (portfolioNow * upper) / 12,
+        monthlyBase: baseAnnual / 12,
+        currentRate: profile.baseRate,
+        lowerRate: lower,
+        upperRate: upper,
+        profile,
+        perfVsLast: 0,
+        actions: [
+          'This month = current portfolio × base rate (±20% rails).',
+          'The 12‑month list updates from Finnhub first-of-month closes when they arrive — the tab does not wait on that feed.'
+        ]
+      };
+      budgetForceReview = false;
 
-      let pastHtml = '';
-      let pastRows = [];
-      let g; // unified current recommendation (end of 12-mo walk)
-
-      try {
-        const series = await Promise.race([
-          buildPast12MonthPortfolioSeries(!!s0.includeHome),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('history timeout')), 25000))
-        ]);
-        // One path only: sequential GK from oldest month → now (live portfolio on last row)
-        const rowsForWalk = series.rows.map((r, i) => {
-          if (i === series.rows.length - 1) return { ...r, portfolio: portfolioNow };
-          return r;
-        });
-        pastRows = backCalcGuardrailsSeries(rowsForWalk, profile);
-        if (pastRows.length) pastRows[pastRows.length - 1].isCurrent = true;
-
-        // Current month = last step of the same walk (not a separate localStorage path)
-        const cur = pastRows[pastRows.length - 1] || spendForPortfolio(portfolioNow, profile);
-        const lower = profile.baseRate * 0.80;
-        const upper = profile.baseRate * 1.20;
-        const baseAnnual = portfolioNow * profile.baseRate;
-        g = {
-          portfolioNow,
-          annual: cur.annual,
-          monthly: cur.monthly,
-          monthlyMin: (portfolioNow * lower) / 12,
-          monthlyMax: (portfolioNow * upper) / 12,
-          monthlyBase: baseAnnual / 12,
-          currentRate: portfolioNow > 0 ? cur.annual / portfolioNow : profile.baseRate,
-          lowerRate: lower,
-          upperRate: upper,
-          profile,
-          perfVsLast: 0,
-          actions: [
-            'Recommended = end of the same 12‑month sequential walk shown below.',
-            'Dollar mid target starts at base rate and only ±5% after ≥10% down / ≥12% up MoM moves; then clamped inside the rail band.',
-            'Each month’s range is always that month’s portfolio × ' + (lower * 100).toFixed(1) + '%–' + (upper * 100).toFixed(1) + '%.'
-          ]
-        };
-
-        // Persist unified annual so refresh stays consistent with the walk
-        const nextSettings = Object.assign({}, s0, {
-          annualSpend: g.annual,
-          lastPortfolio: portfolioNow,
-          lastReviewAt: new Date().toISOString(),
-          initialPortfolio: s0.initialPortfolio || rowsForWalk[0]?.portfolio || portfolioNow,
-          initialRate: s0.initialRate || profile.baseRate
-        });
-        saveBudgetSettings(nextSettings);
-        budgetForceReview = false;
-
-        pastHtml = `
-        <div class="card p-3 mb-3">
-          <h3 class="text-sm font-semibold text-slate-300 mb-1">Past 12 months · safe spend</h3>
-          <p class="text-[10px] text-slate-500 mb-2">One sequential path for every month including now. Portfolio from share counts × first trading-day close (${series.symbols} symbols). Home ${s0.includeHome ? 'included' : 'excluded'}.</p>
-          <div class="space-y-1.5">
-            <div class="flex justify-between text-[10px] text-slate-500 border-b border-slate-700 pb-1">
-              <span>Month (1st)</span>
-              <span class="text-right">Mid target (range) · rate</span>
-            </div>
-            ${pastRows.map(m => `
-              <div class="text-xs ${m.isCurrent ? 'font-semibold' : ''}">
-                <div class="flex justify-between">
-                  <span class="${m.isCurrent ? 'text-emerald-300' : 'text-slate-400'}">${m.label}${m.isCurrent ? ' · now' : ''}</span>
-                  <span class="${m.isCurrent ? 'text-sky-300' : 'text-slate-300'}">${fmtMoney(m.monthly)}/mo</span>
-                </div>
-                <div class="flex justify-between text-[10px] text-slate-500">
-                  <span>Port. ${fmtMoney(m.portfolio)}</span>
-                  <span>${fmtMoney(m.monthlyMin)}–${fmtMoney(m.monthlyMax)} · ${((m.rate || 0) * 100).toFixed(2)}%</span>
-                </div>
-              </div>`).join('')}
-          </div>
-          <p class="text-[10px] text-slate-600 mt-2">Mid $ only changes after large MoM portfolio moves (±5%) or when rate hits a rail. Range always scales with that month’s portfolio. “Now” is the last row of this same walk.</p>
-        </div>`;
-      } catch (e) {
-        console.warn(e);
+      function monthShell() {
         const now = new Date();
-        const fallbackRows = [];
+        const rows = [];
         for (let i = 11; i >= 0; i--) {
           const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
           const sp = spendForPortfolio(portfolioNow, profile);
-          fallbackRows.push({
+          rows.push({
             label: d.toLocaleString('en-US', { month: 'short', year: 'numeric' }),
             portfolio: portfolioNow,
             ...sp,
             isCurrent: i === 0
           });
         }
-        pastRows = fallbackRows;
-        const lower = profile.baseRate * 0.80;
-        const upper = profile.baseRate * 1.20;
-        const baseAnnual = portfolioNow * profile.baseRate;
-        g = {
-          portfolioNow,
-          annual: baseAnnual,
-          monthly: baseAnnual / 12,
-          monthlyMin: (portfolioNow * lower) / 12,
-          monthlyMax: (portfolioNow * upper) / 12,
-          monthlyBase: baseAnnual / 12,
-          currentRate: profile.baseRate,
-          lowerRate: lower,
-          upperRate: upper,
-          profile,
-          perfVsLast: 0,
-          actions: ['History feed timed out — showing 12 months at current portfolio × base rate. Pull to refresh and reopen Budget.']
-        };
-        budgetForceReview = false;
-        pastHtml = `
-        <div class="card p-3 mb-3">
+        return rows;
+      }
+
+      function pastListHtml(pastRows, note) {
+        return `
+        <div class="card p-3 mb-3" id="budgetPastCard">
           <h3 class="text-sm font-semibold text-slate-300 mb-1">Past 12 months · safe spend</h3>
-          <p class="text-[10px] text-amber-400 mb-2">Could not finish historical prices (${e.message || e}). Rows use today’s portfolio until refresh succeeds.</p>
+          <p class="text-[10px] text-slate-500 mb-2">${note}</p>
           <div class="space-y-1.5">
             <div class="flex justify-between text-[10px] text-slate-500 border-b border-slate-700 pb-1">
               <span>Month (1st)</span>
@@ -4614,10 +4540,7 @@ VTI,50,240.00,13250.00,Capital One Investing`
         </div>`;
       }
 
-      if (!g) {
-        g = applyGuardrails(s0, portfolioNow, profile, { force: true });
-        saveBudgetSettings(g.nextSettings);
-      }
+      let pastHtml = pastListHtml(monthShell(), 'Showing current portfolio on every month while first-of-month prices load…');
 
       const html = `
         <div class="card p-3 mb-3 text-xs text-slate-400 leading-relaxed">
@@ -4692,6 +4615,36 @@ VTI,50,240.00,13250.00,Capital One Investing`
         </div>
       `;
       $('#panel-budget').innerHTML = html;
+
+      // Fill true 12-month history in the background so the tab is never blocked
+      const histGen = (window.__budgetHistGen = (window.__budgetHistGen || 0) + 1);
+      (async () => {
+        try {
+          const series = await Promise.race([
+            buildPast12MonthPortfolioSeries(!!s0.includeHome),
+            new Promise((_, rej) => setTimeout(() => rej(new Error('history timeout')), 12000))
+          ]);
+          if (histGen !== window.__budgetHistGen) return;
+          const rowsForWalk = (series.rows || []).map((r, i, arr) => {
+            if (i === arr.length - 1) return Object.assign({}, r, { portfolio: portfolioNow });
+            return r;
+          });
+          if (!rowsForWalk.length) return;
+          const walked = backCalcGuardrailsSeries(rowsForWalk, profile);
+          if (walked.length) walked[walked.length - 1].isCurrent = true;
+          const card = document.getElementById('budgetPastCard');
+          if (!card) return;
+          const wrap = document.createElement('div');
+          wrap.innerHTML = pastListHtml(walked, `Share counts × first trading-day close (${series.symbols} symbols). Home ${s0.includeHome ? 'included' : 'excluded'}.`);
+          card.replaceWith(wrap.firstElementChild);
+        } catch (e) {
+          const card = document.getElementById('budgetPastCard');
+          if (card) {
+            const note = card.querySelector('p');
+            if (note) note.textContent = 'Using current portfolio for all 12 months (history feed did not finish). Pull-to-refresh, then reopen Budget.';
+          }
+        }
+      })();
 
       const reloadHist = document.getElementById('btnBudgetReloadHist');
       if (reloadHist) reloadHist.onclick = () => {
